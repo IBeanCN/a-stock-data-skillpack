@@ -4,3 +4,6 @@ __pycache__/
 
 # Local cron/runtime logs
 .hermes/*.log
+
+# Local Hermes project automation
+.hermes/
