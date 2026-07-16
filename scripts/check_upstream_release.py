@@ -50,15 +50,65 @@ def upstream_tags() -> list[str]:
     return sorted(set(tags), key=version_key)
 
 
-def released_tags() -> set[str]:
-    out = run([GH, "release", "list", "--repo", REPO, "--limit", "100", "--json", "tagName"], check=False)
+def releases() -> list[dict[str, str]]:
+    out = run([
+        GH,
+        "release",
+        "list",
+        "--repo",
+        REPO,
+        "--limit",
+        "100",
+        "--json",
+        "tagName,isDraft,isPrerelease",
+    ], check=False)
     if not out:
-        return set()
+        return []
     try:
         rows = json.loads(out)
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"failed to parse gh release list JSON: {exc}: {out[:300]}") from exc
-    return {row.get("tagName", "") for row in rows if row.get("tagName")}
+    return [row for row in rows if row.get("tagName") and not row.get("isDraft") and not row.get("isPrerelease")]
+
+
+def next_local_increment(base_tag: str, existing_tags: set[str]) -> str:
+    pattern = re.compile(rf"^{re.escape(base_tag)}\.(\d+)$")
+    current = 0
+    for tag in existing_tags:
+        m = pattern.match(tag)
+        if m:
+            current = max(current, int(m.group(1)))
+    return f"{base_tag}.{current + 1}"
+
+
+def release_commit(tag: str) -> str | None:
+    run(["git", "fetch", "origin", "tag", tag], check=False)
+    resolved = run(["git", "rev-parse", f"refs/tags/{tag}^{{commit}}"], check=False)
+    if resolved:
+        return resolved
+    out = run([GH, "release", "view", tag, "--repo", REPO, "--json", "targetCommitish"], check=False)
+    if not out:
+        return None
+    try:
+        target = json.loads(out).get("targetCommitish")
+    except json.JSONDecodeError:
+        return None
+    if not target:
+        return None
+    resolved = run(["git", "rev-parse", target], check=False)
+    return resolved or target
+
+
+def local_main_has_unreleased_commits(base_release_tag: str) -> bool:
+    run(["git", "fetch", "origin", "main", "--tags"], check=False)
+    head = run(["git", "rev-parse", "origin/main"], check=False) or run(["git", "rev-parse", "HEAD"])
+    released = release_commit(base_release_tag)
+    if not released:
+        return False
+    if head == released:
+        return False
+    merge_base = run(["git", "merge-base", released, head], check=False)
+    return merge_base == released
 
 
 def main() -> int:
@@ -66,25 +116,45 @@ def main() -> int:
     if not tags:
         print("ERROR: no upstream tags found", file=sys.stderr)
         return 2
-    existing = released_tags()
-    latest = tags[-1]
-    if latest in existing:
+    rows = releases()
+    existing = {row["tagName"] for row in rows}
+    latest_upstream = tags[-1]
+    workspace = str(Path(__file__).resolve().parents[1])
+
+    if latest_upstream not in existing:
+        prev = None
+        for candidate in reversed(tags[:-1]):
+            if candidate in existing:
+                prev = candidate
+                break
+        unreleased = tags[tags.index(prev) + 1 :] if prev else tags
+        payload = {
+            "mode": "upstream_sync",
+            "upstream": UPSTREAM,
+            "repo": REPO,
+            "upstream_tag": latest_upstream,
+            "release_tag": latest_upstream,
+            "previous_released_tag": prev,
+            "unreleased_upstream_tags_after_previous": unreleased,
+            "workspace": workspace,
+        }
+        print(json.dumps(payload, ensure_ascii=False))
         return 0
-    prev = None
-    for candidate in reversed(tags[:-1]):
-        if candidate in existing:
-            prev = candidate
-            break
-    unreleased = tags[tags.index(prev) + 1 :] if prev else tags
-    payload = {
-        "upstream": UPSTREAM,
-        "repo": REPO,
-        "tag": latest,
-        "previous_released_tag": prev,
-        "unreleased_upstream_tags_after_previous": unreleased,
-        "workspace": str(Path(__file__).resolve().parents[1]),
-    }
-    print(json.dumps(payload, ensure_ascii=False))
+
+    if local_main_has_unreleased_commits(latest_upstream):
+        release_tag = next_local_increment(latest_upstream, existing)
+        payload = {
+            "mode": "local_increment",
+            "upstream": UPSTREAM,
+            "repo": REPO,
+            "upstream_tag": latest_upstream,
+            "release_tag": release_tag,
+            "previous_released_tag": latest_upstream,
+            "workspace": workspace,
+        }
+        print(json.dumps(payload, ensure_ascii=False))
+        return 0
+
     return 0
 
 
