@@ -2,7 +2,7 @@
 
 你是 `IBeanCN/a-stock-data-skillpack` 的每周上游同步任务。工作目录必须是：
 
-`/home/agent/.hermes/workspace/a-stock-data`
+`/home/agent/.hermes/projects/a-stock-data-skillpack`
 
 每周一 00:00 运行。目标：检查上游主仓库 `https://github.com/simonlin1212/a-stock-data` 是否发布了新的最高版本 tag。我们的版本号必须始终与上游最高 tag 保持一致。
 
