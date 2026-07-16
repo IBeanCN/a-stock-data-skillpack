@@ -71,13 +71,29 @@ def releases() -> list[dict[str, str]]:
     return [row for row in rows if row.get("tagName") and not row.get("isDraft") and not row.get("isPrerelease")]
 
 
-def next_local_increment(base_tag: str, existing_tags: set[str]) -> str:
+def local_increment_number(base_tag: str, tag: str) -> int | None:
     pattern = re.compile(rf"^{re.escape(base_tag)}\.(\d+)$")
+    m = pattern.match(tag)
+    return int(m.group(1)) if m else None
+
+
+def latest_released_for_base(base_tag: str, existing_tags: set[str]) -> str:
+    latest_tag = base_tag
+    latest_num = 0
+    for tag in existing_tags:
+        number = local_increment_number(base_tag, tag)
+        if number is not None and number > latest_num:
+            latest_num = number
+            latest_tag = tag
+    return latest_tag
+
+
+def next_local_increment(base_tag: str, existing_tags: set[str]) -> str:
     current = 0
     for tag in existing_tags:
-        m = pattern.match(tag)
-        if m:
-            current = max(current, int(m.group(1)))
+        number = local_increment_number(base_tag, tag)
+        if number is not None:
+            current = max(current, number)
     return f"{base_tag}.{current + 1}"
 
 
@@ -99,10 +115,10 @@ def release_commit(tag: str) -> str | None:
     return resolved or target
 
 
-def local_main_has_unreleased_commits(base_release_tag: str) -> bool:
+def local_main_has_unreleased_commits(latest_release_tag: str) -> bool:
     run(["git", "fetch", "origin", "main", "--tags"], check=False)
     head = run(["git", "rev-parse", "origin/main"], check=False) or run(["git", "rev-parse", "HEAD"])
-    released = release_commit(base_release_tag)
+    released = release_commit(latest_release_tag)
     if not released:
         return False
     if head == released:
@@ -141,7 +157,8 @@ def main() -> int:
         print(json.dumps(payload, ensure_ascii=False))
         return 0
 
-    if local_main_has_unreleased_commits(latest_upstream):
+    latest_base_release = latest_released_for_base(latest_upstream, existing)
+    if local_main_has_unreleased_commits(latest_base_release):
         release_tag = next_local_increment(latest_upstream, existing)
         payload = {
             "mode": "local_increment",
@@ -149,7 +166,7 @@ def main() -> int:
             "repo": REPO,
             "upstream_tag": latest_upstream,
             "release_tag": release_tag,
-            "previous_released_tag": latest_upstream,
+            "previous_released_tag": latest_base_release,
             "workspace": workspace,
         }
         print(json.dumps(payload, ensure_ascii=False))
