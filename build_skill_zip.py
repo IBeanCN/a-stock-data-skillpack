@@ -65,7 +65,7 @@ def main() -> int:
     parser.add_argument("--prefix", default=None, help="Top-level directory name inside zip")
     args = parser.parse_args()
 
-    root = Path(__file__).resolve().parents[1]
+    root = Path(__file__).resolve().parent
     safe_tag = args.tag.replace(os.sep, "-")
     prefix = args.prefix or f"a-stock-data-skillpack-{safe_tag}"
     output = Path(args.output_dir) / f"a-stock-data-skillpack-{safe_tag}.zip"
