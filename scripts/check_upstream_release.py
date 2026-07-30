@@ -9,13 +9,33 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 UPSTREAM = "https://github.com/simonlin1212/a-stock-data.git"
 REPO = "IBeanCN/a-stock-data-skillpack"
-GH = os.environ.get("GH_BIN", "/home/agent/.local/bin/gh")
+
+
+def resolve_gh() -> str:
+    """Resolve GitHub CLI without depending on an ephemeral container path."""
+    candidates = [
+        os.environ.get("GH_BIN", ""),
+        shutil.which("gh") or "",
+        str(Path.home() / ".local/bin/gh"),
+        "/home/agent/.hermes/home/.local/bin/gh",
+        "/home/agent/.local/bin/gh",
+    ]
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    raise RuntimeError(
+        "GitHub CLI not found. Install gh in a persistent path or set GH_BIN."
+    )
+
+
+GH = resolve_gh()
 
 
 def run(cmd: list[str], *, check: bool = True) -> str:
