@@ -36,6 +36,7 @@ REQUIRED_FUNCTIONS = [
     "dragon_tiger_board",
     "lockup_expiry",
     "industry_comparison",
+    "board_fund_flow",
     "daily_dragon_tiger",
     "margin_trading",
     "block_trade",
@@ -94,6 +95,17 @@ def main() -> int:
     assert client.normalize_code("SH688017") == "688017"
     assert client.normalize_code("688017.SH") == "688017"
     assert client.get_prefix("SH688017") == "sh"
+    assert client.get_prefix("510300") == "sh"
+    assert client.get_prefix("000300") == "sh"
+    assert client.get_prefix("920002") == "bj"
+    assert client.get_prefix("000001") == "sz"
+    for invalid_args in (("unknown", "today", 20), ("industry", "3d", 20)):
+        try:
+            client.board_fund_flow(*invalid_args)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"board_fund_flow 参数校验失效: {invalid_args}")
     assert client.forward_pe(20, 2) == 10
     assert client.calc_peg(30, 0.3) == 1
     print("OK 无网络基础校验通过")

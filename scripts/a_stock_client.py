@@ -91,47 +91,61 @@ DATACENTER_URL = 'https://datacenter-web.eastmoney.com/api/data/v1/get'
 _TDX_SERVERS = [('119.97.185.59', 7709), ('124.70.133.119', 7709), ('116.205.183.150', 7709), ('123.60.73.44', 7709), ('116.205.163.254', 7709), ('121.36.225.169', 7709), ('123.60.70.228', 7709), ('124.71.9.153', 7709), ('110.41.147.114', 7709), ('124.71.187.122', 7709)]
 
 def _probe(ip, port, timeout=2.0):
-    """TCP 握手探测，判断服务器是否可达"""
+    """TCP 握手粗筛；握手成功不代表 mootdx 能真实取数。"""
     try:
         with socket.create_connection((ip, port), timeout=timeout):
             return True
     except Exception:
         return False
 
+def _validate_tdx_client(client, market: str='std') -> bool:
+    """用真实 K 线请求验活；非 std 市场没有合适的 A 股样本，跳过验活。"""
+    if market != 'std':
+        return True
+    try:
+        frame = client.bars(symbol='000001', frequency=9, offset=1)
+        return frame is not None and not frame.empty
+    except Exception:
+        return False
+
 def tdx_client(market='std'):
-    """
-    创建 mootdx 客户端，规避 0.11.x BESTIP.HQ 空串 bug。
-    顺序兜底，保证 IP 列表老化/换网时仍能工作：
-      1) 顺序探测 _TDX_SERVERS，用第一个 TCP 可达的显式 server；
-      2) 全部不可达 → 回退 mootdx 自带 bestip 测速选优；
-      3) 再不行 → 回退裸 factory（老用户 config 已有可用 BESTIP 时成立）；
-      4) 仍失败 → 抛 RuntimeError，明确报错而非死等。
-    """
+    """创建 mootdx 客户端，并通过真实取数过滤握手成功但返回空数据的坏服务器。"""
     try:
         from mootdx.quotes import Quotes
     except ModuleNotFoundError as exc:
         raise RuntimeError('缺少 Python 依赖 mootdx；安装后再调用通达信 TCP 端点。') from exc
     for ip, port in _TDX_SERVERS:
-        if _probe(ip, port):
-            return Quotes.factory(market=market, server=(ip, port))
-    try:
-        return Quotes.factory(market=market, bestip=True)
-    except Exception:
-        pass
-    try:
-        return Quotes.factory(market=market)
-    except Exception as e:
-        raise RuntimeError('所有 mootdx 服务器均不可达。海外网络通常全部超时（TCP 7709），请走国内代理或更新 _TDX_SERVERS 列表。原始错误：%s' % e)
+        if not _probe(ip, port):
+            continue
+        try:
+            client = Quotes.factory(market=market, server=(ip, port))
+            if _validate_tdx_client(client, market):
+                return client
+        except Exception:
+            continue
+    for kwargs in ({'bestip': True}, {}):
+        try:
+            client = Quotes.factory(market=market, **kwargs)
+            if _validate_tdx_client(client, market):
+                return client
+        except Exception:
+            continue
+    raise RuntimeError('所有 mootdx 服务器均无法取到数据（TCP 可达但可能返回空或被 reset）。海外网络通常全部超时（TCP 7709），请走国内代理或更新 _TDX_SERVERS 列表。')
 
 def get_prefix(code: str) -> str:
-    """6位代码 → 市场前缀"""
-    code = normalize_code(code)
-    if code.startswith(('6', '9')):
-        return 'sh'
-    elif code.startswith('8'):
+    """代码 → 市场前缀；支持显式 sh/sz/bj 前缀和沪市指数白名单。"""
+    raw = str(code).strip().lower()
+    if raw.startswith(('sh', 'sz', 'bj')):
+        return raw[:2]
+    code = normalize_code(raw)
+    sh_index = {'000300', '000905', '000016', '000688', '000852', '000010'}
+    if code.startswith('92'):
         return 'bj'
-    else:
-        return 'sz'
+    if code.startswith(('5', '6', '9')) or code in sh_index:
+        return 'sh'
+    if code.startswith(('4', '8')):
+        return 'bj'
+    return 'sz'
 
 def em_get(url: str, params: dict | None=None, headers: dict | None=None, timeout: int=15, allow_proxy_fallback: bool=True, **kwargs):
     """东财统一请求入口：自动节流 + 复用 session + 默认 UA。
@@ -181,13 +195,17 @@ def tencent_quote(codes: list[str]) -> dict[str, dict]:
     返回: {code: {name, price, pe_ttm, pb, mcap, ...}}
     """
     prefixed = []
-    for c in codes:
-        if c.startswith(('6', '9')):
-            prefixed.append(f'sh{c}')
-        elif c.startswith('8'):
-            prefixed.append(f'bj{c}')
+    key_of = {}
+    for original in codes:
+        c = str(original).strip()
+        low = c.lower()
+        if low.startswith(('sh', 'sz', 'bj')):
+            query_code = low
         else:
-            prefixed.append(f'sz{c}')
+            normalized = normalize_code(c)
+            query_code = f'{get_prefix(c)}{normalized}'
+        prefixed.append(query_code)
+        key_of[query_code] = c
     url = 'https://qt.gtimg.cn/q=' + ','.join(prefixed)
     req = urllib.request.Request(url)
     req.add_header('User-Agent', 'Mozilla/5.0')
@@ -201,8 +219,8 @@ def tencent_quote(codes: list[str]) -> dict[str, dict]:
         vals = line.split('"')[1].split('~')
         if len(vals) < 53:
             continue
-        code = key[2:]
-        result[code] = {'name': vals[1], 'price': float(vals[3]) if vals[3] else 0, 'last_close': float(vals[4]) if vals[4] else 0, 'open': float(vals[5]) if vals[5] else 0, 'change_amt': float(vals[31]) if vals[31] else 0, 'change_pct': float(vals[32]) if vals[32] else 0, 'high': float(vals[33]) if vals[33] else 0, 'low': float(vals[34]) if vals[34] else 0, 'amount_wan': float(vals[37]) if vals[37] else 0, 'turnover_pct': float(vals[38]) if vals[38] else 0, 'pe_ttm': float(vals[39]) if vals[39] else 0, 'amplitude_pct': float(vals[43]) if vals[43] else 0, 'mcap_yi': float(vals[44]) if vals[44] else 0, 'float_mcap_yi': float(vals[45]) if vals[45] else 0, 'pb': float(vals[46]) if vals[46] else 0, 'limit_up': float(vals[47]) if vals[47] else 0, 'limit_down': float(vals[48]) if vals[48] else 0, 'vol_ratio': float(vals[49]) if vals[49] else 0, 'pe_static': float(vals[52]) if vals[52] else 0}
+        code = key_of.get(key, key[2:])
+        result[code] = {'name': vals[1], 'price': float(vals[3]) if vals[3] else 0, 'last_close': float(vals[4]) if vals[4] else 0, 'open': float(vals[5]) if vals[5] else 0, 'change_amt': float(vals[31]) if vals[31] else 0, 'change_pct': float(vals[32]) if vals[32] else 0, 'high': float(vals[33]) if vals[33] else 0, 'low': float(vals[34]) if vals[34] else 0, 'amount_wan': float(vals[37]) if vals[37] else 0, 'turnover_pct': float(vals[38]) if vals[38] else 0, 'pe_ttm': float(vals[39]) if vals[39] else 0, 'amplitude_pct': float(vals[43]) if vals[43] else 0, 'float_mcap_yi': float(vals[44]) if vals[44] else 0, 'mcap_yi': float(vals[45]) if vals[45] else 0, 'pb': float(vals[46]) if vals[46] else 0, 'limit_up': float(vals[47]) if vals[47] else 0, 'limit_down': float(vals[48]) if vals[48] else 0, 'vol_ratio': float(vals[49]) if vals[49] else 0, 'pe_static': float(vals[52]) if vals[52] else 0}
     return result
 
 def baidu_kline_with_ma(code: str, start_time: str='') -> dict:
@@ -528,6 +546,57 @@ def industry_comparison(top_n: int=20) -> dict:
     for i, item in enumerate(items):
         rows.append({'rank': i + 1, 'name': item.get('f14', ''), 'change_pct': item.get('f3', 0), 'code': item.get('f12', ''), 'up_count': item.get('f104', 0), 'down_count': item.get('f105', 0), 'leader': item.get('f140', ''), 'leader_change': item.get('f136', 0)})
     return {'top': rows[:top_n], 'bottom': rows[-top_n:], 'total': len(rows)}
+
+_BOARD_FS = {'industry': 'm:90+t:2', 'concept': 'm:90+t:3', 'region': 'm:90+t:1'}
+_BOARD_PERIOD = {
+    'today': ('f62', 'f62', 'f184', 'f3', 'f204'),
+    '5d': ('f164', 'f164', 'f165', 'f109', 'f257'),
+    '10d': ('f174', 'f174', 'f175', 'f160', None),
+}
+
+def board_fund_flow(board_type: str='industry', period: str='today', top_n: int=20) -> dict:
+    """板块资金流排名：行业/概念/地域 × 今日/5日/10日，按主力净流入降序。"""
+    if board_type not in _BOARD_FS:
+        raise ValueError(f'board_type 须为 {list(_BOARD_FS)}')
+    if period not in _BOARD_PERIOD:
+        raise ValueError(f'period 须为 {list(_BOARD_PERIOD)}')
+    if top_n < 0:
+        raise ValueError('top_n 须为非负整数')
+    fid, f_main, f_pct, f_chg, f_leader = _BOARD_PERIOD[period]
+    fields = ['f12', 'f14', f_chg, f_main, f_pct]
+    if f_leader:
+        fields.append(f_leader)
+    if period == 'today':
+        fields += ['f66', 'f72', 'f78', 'f84']
+    url = 'https://push2.eastmoney.com/api/qt/clist/get'
+    page_size = 200
+    base = {'pz': str(page_size), 'po': '1', 'np': '1', 'fltt': '2', 'invt': '2', 'fid': fid, 'fs': _BOARD_FS[board_type], 'fields': ','.join(dict.fromkeys(fields))}
+
+    def page(number: int):
+        response = em_get(url, params={**base, 'pn': str(number)}, headers={'User-Agent': UA}, timeout=15)
+        data = response.json().get('data') or {}
+        return data.get('diff') or [], int(data.get('total') or 0)
+
+    items, total = page(1)
+    page_number = 2
+    while len(items) < top_n:
+        if total and len(items) >= total:
+            break
+        more, _ = page(page_number)
+        if not more:
+            break
+        items += more
+        page_number += 1
+        if len(more) < page_size:
+            break
+    total = max(total, len(items))
+    rows = []
+    for index, item in enumerate(items):
+        row = {'rank': index + 1, 'name': item.get('f14', ''), 'code': item.get('f12', ''), 'change_pct': item.get(f_chg, 0), 'main_net': item.get(f_main, 0), 'main_pct': item.get(f_pct, 0), 'leader': item.get(f_leader, '') if f_leader else ''}
+        if period == 'today':
+            row.update({'super_large_net': item.get('f66', 0), 'large_net': item.get('f72', 0), 'medium_net': item.get('f78', 0), 'small_net': item.get('f84', 0)})
+        rows.append(row)
+    return {'board_type': board_type, 'period': period, 'total': total, 'rows': rows[:top_n]}
 
 def daily_dragon_tiger(trade_date: str=None, min_net_buy: float=None) -> dict:
     """
@@ -1010,7 +1079,7 @@ def calc_peg(pe: float, cagr: float) -> float:
 def full_valuation(code: str) -> dict:
     """单票完整估值分析"""
     _require_pandas()
-    prefix = 'sh' if code.startswith(('6', '9')) else 'bj' if code.startswith('8') else 'sz'
+    prefix = 'bj' if code.startswith(('92', '8')) else 'sh' if code.startswith(('6', '9')) else 'sz'
     url = f'https://qt.gtimg.cn/q={prefix}{code}'
     req = urllib.request.Request(url)
     req.add_header('User-Agent', 'Mozilla/5.0')
@@ -1066,7 +1135,7 @@ def dragon_tiger_backup(trade_date: str) -> dict:
 
 def fund_flow_backup(code: str, days: int=60) -> list:
     """个股资金流备用源（东财被封时用）：新浪，日度四档单净额。"""
-    pre = ('sh' if code.startswith(('6', '9')) else 'bj' if code.startswith('8') else 'sz') + code
+    pre = ('bj' if code.startswith(('92', '8')) else 'sh' if code.startswith(('6', '9')) else 'sz') + code
     u = f'https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssl_qsfx_zjlrqs?page=1&num={days}&sort=opendate&asc=0&daima={pre}'
     req = urllib.request.Request(u, headers={'User-Agent': UA, 'Referer': 'https://finance.sina.com.cn/'})
     with urllib.request.urlopen(req, timeout=15) as r:
