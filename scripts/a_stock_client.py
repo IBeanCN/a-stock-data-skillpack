@@ -22,7 +22,7 @@ from typing import Any
 import urllib.request
 from io import StringIO
 import secrets
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from collections import Counter
 import uuid
 import ssl
@@ -61,18 +61,52 @@ def _new_session(trust_env: bool = False):
     return session
 
 
-def normalize_code(code: str) -> str:
-    """Normalize A-share ticker formats to six digits.
+_TICKER_RE = re.compile(
+    r'^(?:(sh|sz|bj)(\d{6})|(\d{6})(?:\.(sh|sz|bj))?)$', re.IGNORECASE
+)
 
-    Supports: 688017, SH688017, sh688017, 688017.SH, SZ000001, BJ832000.
+
+def _natural_market(digits: str) -> str:
+    """六位代码的自然市场；000xxx 的指数/个股歧义由调用方处理。"""
+    if digits.startswith('92') or digits[:2] in ('43', '83', '87'):
+        return 'bj'
+    if digits[0] in ('5', '6', '9'):
+        return 'sh'
+    return 'sz'
+
+
+def normalize_code(code: str, stock_only: bool = False) -> str:
+    """严格归一化 A 股代码，格式或市场矛盾时抛 ValueError。
+
+    支持 688017、SH688017、688017.SH、SZ000001、BJ920982。
+    ``stock_only=True`` 会拒绝显式写成沪市指数的 000xxx。
     """
-    raw = str(code).strip().upper()
-    raw = re.sub(r'^(SH|SZ|BJ)', '', raw)
-    raw = re.sub(r'\.(SH|SZ|BJ)$', '', raw)
-    digits = re.sub(r'\D', '', raw)
-    if len(digits) != 6:
-        raise ValueError(f'无法识别 A 股 6 位代码: {code!r}')
+    raw = str(code).strip()
+    match = _TICKER_RE.match(raw)
+    if not match:
+        raise ValueError(
+            f'无法把 {code!r} 解析为 6 位股票代码；支持 600519 / SH600519 / 600519.SH'
+        )
+    digits = match.group(2) or match.group(3)
+    market = (match.group(1) or match.group(4) or '').lower()
+    if market:
+        if digits.startswith('000'):
+            if market == 'bj':
+                raise ValueError(f'{code!r} 市场标识与号段矛盾：000xxx 不属北交所。')
+            if stock_only and market == 'sh':
+                raise ValueError(
+                    f'{code!r} 指向沪市指数而非个股；个股接口如需同号深市股票请传 sz{digits}。'
+                )
+        else:
+            natural = _natural_market(digits)
+            if market != natural:
+                raise ValueError(
+                    f'{code!r} 的市场标识与号段矛盾：{digits} 属 {natural} 市，而不是 {market} 市。'
+                )
     return digits
+
+
+norm_ticker = normalize_code
 
 EM_HOT_BODY = {'appId': 'appId01', 'globalId': '786e4c21-70dc-435a-93bb-38'}
 SINA_OPT_HDR = {'Referer': 'https://stock.finance.sina.com.cn/', 'User-Agent': UA}
@@ -221,6 +255,12 @@ def tencent_quote(codes: list[str]) -> dict[str, dict]:
             continue
         code = key_of.get(key, key[2:])
         result[code] = {'name': vals[1], 'price': float(vals[3]) if vals[3] else 0, 'last_close': float(vals[4]) if vals[4] else 0, 'open': float(vals[5]) if vals[5] else 0, 'change_amt': float(vals[31]) if vals[31] else 0, 'change_pct': float(vals[32]) if vals[32] else 0, 'high': float(vals[33]) if vals[33] else 0, 'low': float(vals[34]) if vals[34] else 0, 'amount_wan': float(vals[37]) if vals[37] else 0, 'turnover_pct': float(vals[38]) if vals[38] else 0, 'pe_ttm': float(vals[39]) if vals[39] else 0, 'amplitude_pct': float(vals[43]) if vals[43] else 0, 'float_mcap_yi': float(vals[44]) if vals[44] else 0, 'mcap_yi': float(vals[45]) if vals[45] else 0, 'pb': float(vals[46]) if vals[46] else 0, 'limit_up': float(vals[47]) if vals[47] else 0, 'limit_down': float(vals[48]) if vals[48] else 0, 'vol_ratio': float(vals[49]) if vals[49] else 0, 'pe_static': float(vals[52]) if vals[52] else 0}
+        quote = result[code]
+        quote['is_stale'] = quote['amount_wan'] == 0 and quote['price'] == quote['last_close'] and quote['price'] > 0
+        if quote['is_stale'] and key[2:4] in ('43', '83', '87'):
+            quote['stale_reason'] = '北交所老号段，多数已迁至 920xxx，请按名称反查现行代码'
+        elif quote['is_stale']:
+            quote['stale_reason'] = '成交量为 0（停牌 / 未开盘 / 废码），报价非当日真实成交'
     return result
 
 def baidu_kline_with_ma(code: str, start_time: str='') -> dict:
@@ -238,7 +278,8 @@ def baidu_kline_with_ma(code: str, start_time: str='') -> dict:
     return {'keys': keys, 'rows': rows}
 
 def eastmoney_reports(code: str, max_pages: int=5) -> list[dict]:
-    """拉取指定股票的研报列表"""
+    """拉取指定股票的研报列表；错误格式或北交所废弃老码不会静默返回空。"""
+    code = normalize_code(code, stock_only=True)
     all_records = []
     for page in range(1, max_pages + 1):
         params = {'industryCode': '*', 'pageSize': '100', 'industry': '*', 'rating': '*', 'ratingChange': '*', 'beginTime': '2000-01-01', 'endTime': '2030-01-01', 'pageNo': str(page), 'fields': '', 'qType': '0', 'orgCode': '', 'code': code, 'rcode': '', 'p': str(page), 'pageNum': str(page), 'pageNumber': str(page)}
@@ -250,6 +291,11 @@ def eastmoney_reports(code: str, max_pages: int=5) -> list[dict]:
         all_records.extend(rows)
         if page >= (d.get('TotalPage', 1) or 1):
             break
+    if not all_records and code[:2] in ('43', '83', '87'):
+        raise ValueError(
+            f'{code} 属北交所老号段（43/83/87），东财研报库已不再按老码索引。'
+            '北交所存量标的已基本迁至 920xxx（如 832982→920982）；请按名称反查现行代码。'
+        )
     return all_records
 
 def download_pdf(record: dict, target_dir: str='./reports') -> str | None:
@@ -272,10 +318,13 @@ def download_pdf(record: dict, target_dir: str='./reports') -> str | None:
         return str(target)
     return None
 
-def eastmoney_industry_reports(industry_code: str='*', max_pages: int=5, begin: str='2024-01-01') -> list[dict]:
+def eastmoney_industry_reports(industry_code: str='*', max_pages: int=5, begin: str='') -> list[dict]:
     """拉取行业研报列表（qType=1）。
     industry_code="*" = 全行业；传东财行业码（如 "1238"=IT服务Ⅱ）= 单行业。
-    行业名 / 行业码在每条 record 的 industryName / industryCode 字段。"""
+    行业名 / 行业码在每条 record 的 industryName / industryCode 字段。
+    begin 留空时默认查询相对今天近两年。"""
+    if not begin:
+        begin = (date.today() - timedelta(days=730)).isoformat()
     all_records = []
     for page in range(1, max_pages + 1):
         params = {'industryCode': industry_code, 'pageSize': '100', 'industry': '*', 'rating': '*', 'ratingChange': '*', 'beginTime': begin, 'endTime': '2030-01-01', 'pageNo': str(page), 'fields': '', 'qType': '1'}
@@ -296,6 +345,7 @@ def ths_eps_forecast(code: str) -> pd.DataFrame:
     返回 DataFrame: 年度, 预测机构数, 最小值, 均值, 最大值
     "均值" = 机构一致预期EPS
     """
+    code = normalize_code(code, stock_only=True)
     _require_requests()
     _require_pandas()
     url = f'https://basic.10jqka.com.cn/new/{code}/worth.html'
@@ -918,6 +968,93 @@ def limit_up_sentiment(date: str) -> dict:
         ladder[s['limit_days']] = ladder.get(s['limit_days'], 0) + 1
     zt_n, zb_n = (len(zt), len(zb))
     return {'date': date, 'zt_count': zt_n, 'zb_count': zb_n, 'dt_count': len(dt), 'break_rate': round(zb_n / (zt_n + zb_n) * 100, 1) if zt_n + zb_n else 0, 'max_height': max((s['limit_days'] for s in zt), default=0), 'ladder': dict(sorted(ladder.items()))}
+
+
+CN_TZ = timezone(timedelta(hours=8))
+MONITOR_URL = 'https://mobappconfig.securities.eastmoney.com/emcfg/stock_monitor.json'
+_MONITOR_MARKET = {'1': 'SH', '0': 'SZ', 'B': 'BJ'}
+
+
+def cn_today() -> str:
+    """北京时间的今天（YYYY-MM-DD）。"""
+    return datetime.now(CN_TZ).date().isoformat()
+
+
+def em_stock_monitor(only_active: bool = True) -> list[dict]:
+    """东财重点监控池；返回代码、名称、市场和监控生效时间窗。"""
+    response = em_get(MONITOR_URL, headers={'Referer': 'https://vipmoney.eastmoney.com/'}, timeout=20)
+    rows = response.json() or []
+    today = cn_today()
+    result = []
+    for item in rows:
+        start = item.get('VALIDATESTARTDATE', '')
+        end = item.get('VALIDATEENDDATE', '')
+        if only_active and not (start <= today <= end):
+            continue
+        raw_market = str(item.get('MARKET', '')).upper()
+        result.append({
+            'code': item.get('STKCODE', ''), 'name': item.get('STKNAME', ''),
+            'market': _MONITOR_MARKET.get(raw_market, f'?{raw_market}'),
+            'start': start, 'end': end, 'link': item.get('LINK_URL', ''),
+        })
+    return result
+
+
+ANOMALY_BASE = 'https://dycalchis.eastmoney.com/price-anomaly'
+HQ_PARAMS = {'team': 'h5', 'product': 'EastMoney', 'client': 'WAP', 'version': '9001', 'name': 'WAP', 'user': '123'}
+ANOMALY_RULES = {
+    1: '主板连续10个交易日内4次出现同向异常波动', 2: '创业板连续10个交易日内3次出现同向异常波动',
+    3: '科创板连续10个交易日内3次出现同向异常波动', 4: '连续十个交易日内日收盘价涨跌幅偏离值累计达到+100%',
+    5: '连续十个交易日内日收盘价涨跌幅偏离值累计达到-50%', 6: '连续三十个交易日内日收盘价涨跌幅偏离值累计达到+200%',
+    7: '连续三十个交易日内日收盘价涨跌幅偏离值累计达到-70%', 8: '北交所连续10个交易日内3次出现同向异常波动',
+    40: '连续十个交易日内日收盘价涨跌幅偏离值累计达到+150%', 50: '连续十个交易日内日收盘价涨跌幅偏离值累计达到-60%',
+    60: '连续30个交易日内日收盘价涨跌幅偏离值累计达到+300%', 70: '连续30个交易日内日收盘价涨跌幅偏离值累计达到-75%',
+}
+
+
+def _anomaly_market(code, market, board=None) -> str:
+    value = str(code or '')
+    if value.startswith('920') or value[:2] in ('43', '83', '87') or board == 8:
+        return 'BJ'
+    return 'SH' if market == 1 else 'SZ'
+
+
+def _anomaly_get(path: str, page_size: int, page_no: int, **extra) -> dict:
+    params = {**HQ_PARAMS, 'pageSize': str(page_size), 'pageNo': str(page_no), **extra}
+    response = em_get(f'{ANOMALY_BASE}/{path}', params=params, headers={'Referer': 'https://vipmoney.eastmoney.com/'}, timeout=20)
+    payload = response.json()
+    if payload.get('result') != 0:
+        raise RuntimeError(f"东财异动接口拒绝: result={payload.get('result')} msg={payload.get('msg')!r}")
+    return payload
+
+
+def em_price_anomaly(page_size: int = 200, page_no: int = 1) -> dict:
+    """日内严重异常波动明细；返回 date/pages/items。"""
+    payload = _anomaly_get('list', page_size, page_no)
+    items = []
+    for item in payload.get('data') or []:
+        rule = item.get('e')
+        key = rule * 10 if item.get('s') == 6 and rule in (4, 5, 6, 7) else rule
+        items.append({
+            'code': item.get('c'), 'name': item.get('n'),
+            'market': _anomaly_market(item.get('c'), item.get('m'), item.get('s')),
+            'change_pct': item.get('a'), 'deviation': item.get('x'), 'days': item.get('d'),
+            'board': item.get('s'), 'rule_code': key, 'rule': ANOMALY_RULES.get(key, f'未知规则码 {key}'),
+            'is_today': item.get('o') != 2,
+        })
+    return {'date': str(payload.get('date', '')), 'pages': payload.get('pages', 0), 'items': items}
+
+
+def em_price_anomaly_count(page_size: int = 50, page_no: int = 1, sort_key: str = '', sort_dir: str = '') -> dict:
+    """按标的聚合的严重异常波动次数、现价和累计偏离值。"""
+    payload = _anomaly_get('count', page_size, page_no, sortKey=sort_key, sortDir=sort_dir)
+    items = [{
+        'code': item.get('c'), 'name': item.get('n'),
+        'market': _anomaly_market(item.get('c'), item.get('m'), item.get('s')),
+        'price': item.get('p'), 'change_pct': item.get('a'), 'times': item.get('t'),
+        'deviation': item.get('x'), 'days': item.get('d'), 'board': item.get('s'),
+    } for item in payload.get('data') or []]
+    return {'date': str(payload.get('date', '')), 'pages': payload.get('pages', 0), 'items': items}
 
 def _opt_f(x):
     try:

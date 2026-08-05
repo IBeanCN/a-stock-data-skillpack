@@ -16,6 +16,7 @@ CLIENT = ROOT / "a_stock_client.py"
 
 REQUIRED_FUNCTIONS = [
     "normalize_code",
+    "norm_ticker",
     "get_prefix",
     "tdx_client",
     "em_get",
@@ -55,6 +56,9 @@ REQUIRED_FUNCTIONS = [
     "em_yzt_pool",
     "ths_limit_up_pool",
     "limit_up_sentiment",
+    "em_stock_monitor",
+    "em_price_anomaly",
+    "em_price_anomaly_count",
     "sina_option_codes",
     "sina_option_tquote",
     "sina_option_greeks",
@@ -94,6 +98,20 @@ def main() -> int:
 
     assert client.normalize_code("SH688017") == "688017"
     assert client.normalize_code("688017.SH") == "688017"
+    assert client.normalize_code("BJ920982") == "920982"
+    for invalid_code in ("SZ600519", "BJ000001", "SH000001.SZ"):
+        try:
+            client.normalize_code(invalid_code)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"ticker 严格校验失效: {invalid_code}")
+    try:
+        client.normalize_code("SH000001", stock_only=True)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("个股接口未拒绝显式沪市 000xxx 指数")
     assert client.get_prefix("SH688017") == "sh"
     assert client.get_prefix("510300") == "sh"
     assert client.get_prefix("000300") == "sh"
@@ -126,6 +144,8 @@ def main() -> int:
             ("东财个股信息", lambda: client.eastmoney_stock_info("600519")),
             ("巨潮公告", lambda: client.cninfo_announcements("600519", page_size=3)),
             ("涨停池", lambda: client.em_zt_pool(today)),
+            ("重点监控池", lambda: client.em_stock_monitor()),
+            ("日内异动池", lambda: client.em_price_anomaly(page_size=20)),
             ("ETF期权代码", lambda: client.sina_option_codes("510050")),
         ]
         ok = warn = 0

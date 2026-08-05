@@ -2,7 +2,7 @@
 name: a-stock-data
 description: 当任务需要写代码实际获取A股数据时使用：行情/K线、研报、信号、资金面、新闻、财务/F10、公告、打板、ETF期权、舆情互动、备用源和估值等真实数据。渐进式披露 Skill 包：SKILL.md 只负责触发、路由和约束；端点实现统一在 scripts/a_stock_client.py；端点说明、字段口径、工作流、FAQ 按需读取 references/。
 origin: custom
-version: 3.5.1-progressive-client
+version: 3.6.0-progressive-client
 ---
 # A股全栈数据工具包（渐进式披露）
 
@@ -44,7 +44,7 @@ version: 3.5.1-progressive-client
 | 个股新闻、财联社电报、全市场 7x24 快讯 | `references/endpoint-news.md` |
 | 财务快照、F10、东财基本面、新浪财报三表 | `references/endpoint-fundamentals.md` |
 | 巨潮公告、公告备用源 | `references/endpoint-announcements.md` |
-| 涨停池、炸板池、跌停池、昨日涨停、打板情绪 | `references/endpoint-limit-up.md` |
+| 涨停池、炸板池、跌停池、昨日涨停、打板情绪、重点监控、日内异动 | `references/endpoint-limit-up.md` |
 | ETF 期权合约、T 型报价、希腊字母、IV | `references/endpoint-options.md` |
 | 互动易、同花顺热榜、东财人气榜、概念命中 | `references/endpoint-sentiment.md` |
 | 主源失败后的交易所/新浪/深交所备用源 | `references/fallback-sources.md` |

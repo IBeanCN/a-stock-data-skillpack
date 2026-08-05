@@ -31,7 +31,7 @@ export IWENCAI_BASE_URL="https://openapi.iwencai.com"
 
 ## Ticker 归一化
 
-`normalize_code()` 支持：
+`normalize_code()` / `norm_ticker()` 严格解析并支持：
 
 | 输入 | 输出 |
 |---|---|
@@ -40,6 +40,8 @@ export IWENCAI_BASE_URL="https://openapi.iwencai.com"
 | `688017.SH` / `688017.sh` | `688017` |
 | `SZ000001` | `000001` |
 | `BJ832000` | `832000` |
+
+格式错误、前后缀并用、市场标识与号段矛盾时会抛 `ValueError`，不会提取数字后静默猜测。个股专用接口使用 `stock_only=True`，可拒绝显式写成 `SH000001` 的沪市指数。
 
 `get_prefix()` 支持显式 `sh`/`sz`/`bj` 前缀透传。裸代码规则：
 
@@ -52,6 +54,8 @@ export IWENCAI_BASE_URL="https://openapi.iwencai.com"
 | 其他 | `sz` |
 
 `000001` 默认是 `sz000001`（平安银行）；如需上证指数须显式传 `sh000001`。`tencent_quote()` 保留显式前缀入参作为结果键，允许同批查询 `sh000001` 与 `sz000001`。
+
+北交所存量股票已大规模迁至 `920xxx`。`43/83/87` 老号段可能返回 HTTP 200 但内容是定格报价或空研报；腾讯结果会标记 `is_stale` / `stale_reason`，东财个股研报遇老号段空结果会抛错，调用前应按名称反查现行代码。
 
 ## 数据源优先级
 
