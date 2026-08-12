@@ -126,6 +126,17 @@ def main() -> int:
             raise AssertionError(f"board_fund_flow 参数校验失效: {invalid_args}")
     assert client.forward_pe(20, 2) == 10
     assert client.calc_peg(30, 0.3) == 1
+    original_datacenter = client.eastmoney_datacenter
+    client.eastmoney_datacenter = lambda *args, **kwargs: []
+    try:
+        empty_lhb = client.dragon_tiger_board("600519", "2026-08-09")
+    finally:
+        client.eastmoney_datacenter = original_datacenter
+    assert empty_lhb == {
+        "records": [],
+        "seats": {"buy": [], "sell": []},
+        "institution": {"buy_amt": 0.0, "sell_amt": 0.0, "net_amt": 0.0},
+    }
     print("OK 无网络基础校验通过")
 
     if args.network:

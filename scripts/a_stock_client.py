@@ -539,6 +539,9 @@ def dragon_tiger_board(code: str, trade_date: str, look_back: int=30) -> dict:
     data = eastmoney_datacenter('RPT_DAILYBILLBOARD_DETAILSNEW', filter_str=f'''(TRADE_DATE>='{start_str}')(TRADE_DATE<='{trade_date}')(SECURITY_CODE="{code}")''', page_size=50, sort_columns='TRADE_DATE', sort_types='-1')
     for row in data:
         records.append({'date': str(row.get('TRADE_DATE', ''))[:10], 'reason': row.get('EXPLANATION', ''), 'net_buy': round((row.get('BILLBOARD_NET_AMT') or 0) / 10000, 1), 'turnover': round(float(row.get('TURNOVERRATE') or 0), 2)})
+    # 第 3 步会无条件统计机构席位；回看窗口无上榜记录时也必须有空列表，
+    # 否则 buy_data/sell_data 未绑定并抛 UnboundLocalError（upstream #45）。
+    buy_data, sell_data = [], []
     seats = {'buy': [], 'sell': []}
     if records:
         latest_date = records[0]['date']

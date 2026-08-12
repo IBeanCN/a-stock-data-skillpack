@@ -2,9 +2,11 @@
 name: a-stock-data
 description: 当任务需要写代码实际获取A股数据时使用：行情/K线、研报、信号、资金面、新闻、财务/F10、公告、打板、ETF期权、舆情互动、备用源和估值等真实数据。渐进式披露 Skill 包：SKILL.md 只负责触发、路由和约束；端点实现统一在 scripts/a_stock_client.py；端点说明、字段口径、工作流、FAQ 按需读取 references/。
 origin: custom
-version: 3.6.0-progressive-client
+version: 3.6.1-progressive-client
 ---
 # A股全栈数据工具包（渐进式披露）
+
+> v3.6.1：修复 `dragon_tiger_board()` 在回看窗口没有龙虎榜记录时因未初始化席位列表而崩溃；现在返回语义一致的空结构。
 
 项目主页：https://github.com/simonlin1212/a-stock-data  
 作者：Simon 林 · 抖音「Simon林」· 公众号「硅基世纪」
