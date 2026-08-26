@@ -11,6 +11,9 @@ pip install -r requirements.txt
 - `lxml`：`pandas.read_html()` 解析 HTML 表格。
 - `mootdx`：通达信 TCP 行情、财务快照、F10。
 - `stockstats`：技术指标扩展，当前端点不强制使用。
+- `numpy`：筹码分布网格计算。
+- `baostock`：估值历史、换手率、停牌/ST、上市/退市状态（不支持北交所）。
+- `xlrd >= 2.0`：读取申万 `.xls`；`openpyxl`：读取人民银行 `.xlsx`。
 
 环境检查：
 
@@ -43,7 +46,7 @@ export IWENCAI_BASE_URL="https://openapi.iwencai.com"
 
 格式错误、前后缀并用、市场标识与号段矛盾时会抛 `ValueError`，不会提取数字后静默猜测。个股专用接口使用 `stock_only=True`，可拒绝显式写成 `SH000001` 的沪市指数。
 
-`get_prefix()` 支持显式 `sh`/`sz`/`bj` 前缀透传。裸代码规则：
+`get_prefix()` 支持显式 `sh`/`sz`/`bj` 前缀和等价 `.SH`/`.SZ`/`.BJ` 后缀；显式市场优先于号段推断。裸代码规则：
 
 | 代码开头 | 前缀 |
 |---|---|
@@ -67,9 +70,12 @@ export IWENCAI_BASE_URL="https://openapi.iwencai.com"
 | 2 | 腾讯财经 | 实时价、PE/PB、市值、换手率、涨跌停、指数、ETF | 低 |
 | 3 | 同花顺 | 热点、题材归因、北向、热榜、一致预期 | 低，部分接口需 UA |
 | 4 | 百度股市通 | K线带均线 | 低 |
-| 5 | 新浪财经 | 财报三表、ETF 期权、备用资金流 | 低 |
+| 5 | 新浪财经 | 复权因子、财报三表、ETF 期权、备用资金流 | 低 |
 | 6 | 巨潮 cninfo | 公告、互动易 | 低 |
 | 7 | iwencai | NL 语义搜索 | 需 key |
+| 专用 | baostock | 历史估值、换手率、停牌/ST、上市/退市 | TCP；不支持北交所 |
+| 专用 | 申万研究 | 行业归属变迁 XLS | 无中文行业名 |
+| 专用 | 人民银行 / 国家统计局 | 社融 / PMI | 月频；页面格式变化时 fail-fast |
 | 末位 | 东财 | 研报、资金流、龙虎榜、解禁、两融、大宗、股东户数、分红、新闻、打板、人气 | 有风控 |
 
 ## 东财防封

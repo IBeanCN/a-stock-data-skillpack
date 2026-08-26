@@ -18,6 +18,8 @@ REQUIRED_FUNCTIONS = [
     "normalize_code",
     "norm_ticker",
     "get_prefix",
+    "em_market_code",
+    "em_secid",
     "tdx_client",
     "em_get",
     "eastmoney_datacenter",
@@ -73,6 +75,15 @@ REQUIRED_FUNCTIONS = [
     "dragon_tiger_backup",
     "fund_flow_backup",
     "announcements_backup",
+    "sina_adjust_factor",
+    "apply_adjust",
+    "chip_distribution",
+    "baostock_valuation_history",
+    "baostock_stock_basic",
+    "sw_industry_history",
+    "sw_industry_as_of",
+    "pboc_social_financing",
+    "nbs_pmi",
 ]
 
 
@@ -117,6 +128,42 @@ def main() -> int:
     assert client.get_prefix("000300") == "sh"
     assert client.get_prefix("920002") == "bj"
     assert client.get_prefix("000001") == "sz"
+    assert client.get_prefix("000016.SH") == "sh"
+    assert client.get_prefix("000016.SZ") == "sz"
+    assert client.get_prefix("920982.BJ") == "bj"
+    assert client.em_secid("000016.SH") == "1.000016"
+    adjusted_qfq = client.apply_adjust(
+        [{"date": "2020-01-01", "open": 20, "high": 22, "low": 18, "close": 20}],
+        [{"date": "1900-01-01", "factor": 2}], "qfq")
+    adjusted_hfq = client.apply_adjust(
+        [{"date": "2020-01-01", "open": 20, "high": 22, "low": 18, "close": 20}],
+        [{"date": "1900-01-01", "factor": 2}], "hfq")
+    assert adjusted_qfq[0]["close"] == 10 and adjusted_hfq[0]["close"] == 40
+    try:
+        client.apply_adjust([{"date": "2020-01-01", "close": 20}], [], "qfq")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("apply_adjust 未拒绝空因子")
+    chips = client.chip_distribution([
+        {"date": "2020-01-01", "high": 10, "low": 10, "close": 10, "turn": 1},
+        {"date": "2020-01-02", "high": 100, "low": 100, "close": 100, "turn": 1},
+    ])
+    assert chips["avg_cost"] < 20, chips
+    assert client._pbc_month_label("2026.01") == "2026-01"
+    assert client._pbc_month_label("2026.1") == "2026-10"
+    pmi = client._parse_nbs_pmi_text(
+        "2026年7月采购经理指数",
+        "制造业采购经理指数（ PMI ）为49.2% 非制造业商务活动指数为49.0% "
+        "综合PMI产出指数为49.3% 大、中、小型企业PMI分别为49.5%、49.7%和47.4%",
+        "https://example.invalid/pmi")
+    assert (pmi["manufacturing_pmi"], pmi["pmi_small"]) == (49.2, 47.4)
+    try:
+        client._bs_code("920982")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("baostock 未在登录前拒绝北交所")
     for invalid_args in (("unknown", "today", 20), ("industry", "3d", 20)):
         try:
             client.board_fund_flow(*invalid_args)

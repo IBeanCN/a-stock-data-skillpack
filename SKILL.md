@@ -1,12 +1,12 @@
 ---
 name: a-stock-data
-description: 当任务需要写代码实际获取A股数据时使用：行情/K线、研报、信号、资金面、新闻、财务/F10、公告、打板、ETF期权、舆情互动、备用源和估值等真实数据。渐进式披露 Skill 包：SKILL.md 只负责触发、路由和约束；端点实现统一在 scripts/a_stock_client.py；端点说明、字段口径、工作流、FAQ 按需读取 references/。
+description: 当任务需要写代码实际获取A股数据时使用：行情/K线、研报、信号、资金面、新闻、财务/F10、公告、打板、ETF期权、舆情互动、备用源、复权、筹码、估值历史、行业历史和宏观数据等真实数据。渐进式披露 Skill 包：SKILL.md 只负责触发、路由和约束；端点实现统一在 scripts/a_stock_client.py；端点说明、字段口径、工作流、FAQ 按需读取 references/。
 origin: custom
-version: 3.6.1-progressive-client
+version: 3.7.1-progressive-client
 ---
 # A股全栈数据工具包（渐进式披露）
 
-> v3.6.1：修复 `dragon_tiger_board()` 在回看窗口没有龙虎榜记录时因未初始化席位列表而崩溃；现在返回语义一致的空结构。
+> v3.7.1：新增复权因子、筹码分布、baostock 估值/上市状态、申万行业历史、社融与 PMI；修复东财沪市 ETF 路由及显式市场后缀错票。
 
 项目主页：https://github.com/simonlin1212/a-stock-data  
 作者：Simon 林 · 抖音「Simon林」· 公众号「硅基世纪」
@@ -39,12 +39,13 @@ version: 3.6.1-progressive-client
 | 用户意图 | 读取文件 |
 |---|---|
 | 依赖、ticker 归一化、数据源优先级、东财防封、输出要求 | `references/conventions.md` |
-| 实时行情、K线、盘口、逐笔、PE/PB、市值、指数、ETF | `references/endpoint-market.md` |
+| 实时行情、K线、复权因子、盘口、逐笔、PE/PB、市值、指数、ETF | `references/endpoint-market.md` |
 | 研报列表、PDF、一致预期 EPS、iwencai 语义搜索 | `references/endpoint-research.md` |
 | 热点题材、北向、概念、个股/板块资金流、龙虎榜、解禁、行业轮动 | `references/endpoint-signals.md` |
-| 融资融券、大宗交易、股东户数、分红、120 日资金流 | `references/endpoint-capital-chip.md` |
+| 融资融券、大宗交易、股东户数、分红、120 日资金流、筹码分布 | `references/endpoint-capital-chip.md` |
 | 个股新闻、财联社电报、全市场 7x24 快讯 | `references/endpoint-news.md` |
-| 财务快照、F10、东财基本面、新浪财报三表 | `references/endpoint-fundamentals.md` |
+| 财务快照、F10、估值历史、上市/退市状态、申万行业历史、新浪财报三表 | `references/endpoint-fundamentals.md` |
+| 社融、制造业/非制造业/综合 PMI | `references/endpoint-macro.md` |
 | 巨潮公告、公告备用源 | `references/endpoint-announcements.md` |
 | 涨停池、炸板池、跌停池、昨日涨停、打板情绪、重点监控、日内异动 | `references/endpoint-limit-up.md` |
 | ETF 期权合约、T 型报价、希腊字母、IV | `references/endpoint-options.md` |

@@ -2,8 +2,8 @@
 """A 股全栈数据客户端。
 
 This file centralizes endpoint implementations extracted from the original
-a-stock-data SKILL.md. It intentionally avoids third-party data wrapper
-libraries except optional mootdx for Tongdaxin TCP endpoints.
+a-stock-data SKILL.md. Except for optional mootdx and baostock TCP clients,
+data sources are accessed directly through public HTTP endpoints.
 """
 
 from __future__ import annotations
@@ -20,12 +20,16 @@ import socket
 from pathlib import Path
 from typing import Any
 import urllib.request
+from urllib.parse import urljoin
 from io import StringIO
 import secrets
 from datetime import date, datetime, timedelta, timezone
 from collections import Counter
 import uuid
 import ssl
+import io
+from contextlib import contextmanager
+from typing import Optional
 
 _ctx = ssl.create_default_context()
 UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
@@ -40,6 +44,13 @@ try:
 except ModuleNotFoundError:
     pd = None  # type: ignore
 
+try:
+    import numpy as np  # type: ignore
+except ModuleNotFoundError:
+    np = None  # type: ignore
+
+_BS = None
+
 
 def _require_requests():
     if requests is None:
@@ -51,6 +62,24 @@ def _require_pandas():
     if pd is None:
         raise RuntimeError('缺少 Python 依赖 pandas；安装后再调用返回 DataFrame 的端点。')
     return pd
+
+
+def _require_numpy():
+    if np is None:
+        raise RuntimeError('缺少 Python 依赖 numpy；安装后再调用筹码分布端点。')
+    return np
+
+
+def _require_baostock():
+    """按需导入 baostock，避免未使用该数据源时产生硬依赖。"""
+    global _BS
+    if _BS is None:
+        try:
+            import baostock as bs  # type: ignore
+        except ModuleNotFoundError as exc:
+            raise RuntimeError('缺少 Python 依赖 baostock；安装后再调用估值历史端点。') from exc
+        _BS = bs
+    return _BS
 
 
 def _new_session(trust_env: bool = False):
@@ -167,8 +196,10 @@ def tdx_client(market='std'):
     raise RuntimeError('所有 mootdx 服务器均无法取到数据（TCP 可达但可能返回空或被 reset）。海外网络通常全部超时（TCP 7709），请走国内代理或更新 _TDX_SERVERS 列表。')
 
 def get_prefix(code: str) -> str:
-    """代码 → 市场前缀；支持显式 sh/sz/bj 前缀和沪市指数白名单。"""
+    """代码 → 市场前缀；显式 sh/sz/bj 前缀或 .SH/.SZ/.BJ 后缀优先。"""
     raw = str(code).strip().lower()
+    if raw.endswith(('.sh', '.sz', '.bj')):
+        return raw[-2:]
     if raw.startswith(('sh', 'sz', 'bj')):
         return raw[:2]
     code = normalize_code(raw)
@@ -180,6 +211,17 @@ def get_prefix(code: str) -> str:
     if code.startswith(('4', '8')):
         return 'bj'
     return 'sz'
+
+
+def em_market_code(code: str) -> int:
+    """东财 secid 市场号：沪=1，深/北=0。"""
+    return 1 if get_prefix(code) == 'sh' else 0
+
+
+def em_secid(code: str) -> str:
+    """东财 push2/push2his 的 secid，如 1.600519 / 0.300750。"""
+    return f'{em_market_code(code)}.{norm_ticker(code)}'
+
 
 def em_get(url: str, params: dict | None=None, headers: dict | None=None, timeout: int=15, allow_proxy_fallback: bool=True, **kwargs):
     """东财统一请求入口：自动节流 + 复用 session + 默认 UA。
@@ -486,8 +528,8 @@ def eastmoney_concept_blocks(code: str) -> dict:
     返回: {total, boards: [{name, code(BK码), change_pct, lead_stock}], concept_tags: [板块名...]}
     boards 混合 行业/概念/地域，板块名自解释；concept_tags 是所有板块名的便捷列表。
     """
-    market_code = 1 if code.startswith('6') else 0
-    params = {'fltt': '2', 'invt': '2', 'secid': f'{market_code}.{code}', 'spt': '3', 'pi': '0', 'pz': '200', 'po': '1', 'fields': 'f12,f14,f3,f128'}
+    market_code = em_market_code(code)
+    params = {'fltt': '2', 'invt': '2', 'secid': f'{market_code}.{norm_ticker(code)}', 'spt': '3', 'pi': '0', 'pz': '200', 'po': '1', 'fields': 'f12,f14,f3,f128'}
     headers = {'User-Agent': UA, 'Referer': 'https://quote.eastmoney.com/'}
     try:
         r = em_get('https://push2.eastmoney.com/api/qt/slist/get', params=params, headers=headers, timeout=15)
@@ -509,7 +551,7 @@ def eastmoney_fund_flow_minute(code: str) -> list[dict]:
     返回: [{time, main_net, small_net, mid_net, large_net, super_net}, ...]
     单位: 元
     """
-    secid = f'1.{code}' if code.startswith('6') else f'0.{code}'
+    secid = em_secid(code)
     url = 'https://push2.eastmoney.com/api/qt/stock/fflow/kline/get'
     params = {'secid': secid, 'klt': 1, 'fields1': 'f1,f2,f3,f7', 'fields2': 'f51,f52,f53,f54,f55,f56,f57'}
     headers = {'User-Agent': UA, 'Referer': 'https://quote.eastmoney.com/', 'Origin': 'https://quote.eastmoney.com'}
@@ -520,7 +562,7 @@ def eastmoney_fund_flow_minute(code: str) -> list[dict]:
         print(f'[WARN] push2 资金流请求失败: {e}')
         return []
     rows = []
-    for line in d.get('data', {}).get('klines', []):
+    for line in (d.get('data') or {}).get('klines') or []:
         parts = line.split(',')
         if len(parts) >= 6:
             rows.append({'time': parts[0], 'main_net': float(parts[1]), 'small_net': float(parts[2]), 'mid_net': float(parts[3]), 'large_net': float(parts[4]), 'super_net': float(parts[5])})
@@ -592,7 +634,7 @@ def industry_comparison(top_n: int=20) -> dict:
     headers = {'User-Agent': UA}
     r = em_get(url, params=params, headers=headers, timeout=15)
     d = r.json()
-    items = d.get('data', {}).get('diff', [])
+    items = (d.get('data') or {}).get('diff') or []
     if not items:
         return {'top': [], 'bottom': [], 'total': 0}
     rows = []
@@ -726,9 +768,9 @@ def stock_fund_flow_120d(code: str) -> list[dict]:
     返回: [{date, main_net(主力净流入), small_net, mid_net, large_net, super_net}]
     单位: 元
     """
-    market_code = 1 if code.startswith('6') else 0
+    market_code = em_market_code(code)
     url = 'https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get'
-    params = {'secid': f'{market_code}.{code}', 'fields1': 'f1,f2,f3,f7', 'fields2': 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65', 'lmt': '120'}
+    params = {'secid': f'{market_code}.{norm_ticker(code)}', 'fields1': 'f1,f2,f3,f7', 'fields2': 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65', 'lmt': '120'}
     headers = {'User-Agent': UA, 'Referer': 'https://quote.eastmoney.com/', 'Origin': 'https://quote.eastmoney.com'}
     try:
         r = em_get(url, params=params, headers=headers, timeout=15)
@@ -736,7 +778,7 @@ def stock_fund_flow_120d(code: str) -> list[dict]:
     except Exception as e:
         print(f'[WARN] push2 资金流请求失败: {e}')
         return []
-    klines = d.get('data', {}).get('klines', [])
+    klines = (d.get('data') or {}).get('klines') or []
     rows = []
     for line in klines:
         parts = line.split(',')
@@ -778,7 +820,7 @@ def cls_telegraph(page_size: int=50) -> list[dict]:
     r = requests.get(url, headers=headers, timeout=10)
     d = r.json()
     rows = []
-    for item in d.get('data', {}).get('roll_data', []) or []:
+    for item in (d.get('data') or {}).get('roll_data') or []:
         ts = item.get('ctime')
         t = datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S') if ts else ''
         rows.append({'title': item.get('title', '') or item.get('brief', ''), 'content': item.get('content', '') or item.get('brief', ''), 'time': t})
@@ -795,7 +837,7 @@ def eastmoney_global_news(page_size: int=50) -> list[dict]:
     r = em_get(url, params=params, headers=headers, timeout=10)
     d = r.json()
     rows = []
-    for item in d.get('data', {}).get('fastNewsList', []):
+    for item in (d.get('data') or {}).get('fastNewsList') or []:
         rows.append({'title': item.get('title', ''), 'summary': item.get('summary', '')[:200], 'time': item.get('showTime', '')})
     return rows
 
@@ -804,12 +846,12 @@ def eastmoney_stock_info(code: str) -> dict:
     东财个股基本面信息。
     返回: {code, name, industry, total_shares, float_shares, mcap, float_mcap, list_date}
     """
-    market_code = 1 if code.startswith('6') else 0
+    market_code = em_market_code(code)
     url = 'https://push2.eastmoney.com/api/qt/stock/get'
-    params = {'fltt': '2', 'invt': '2', 'fields': 'f57,f58,f84,f85,f127,f116,f117,f189,f43', 'secid': f'{market_code}.{code}'}
+    params = {'fltt': '2', 'invt': '2', 'fields': 'f57,f58,f84,f85,f127,f116,f117,f189,f43', 'secid': f'{market_code}.{norm_ticker(code)}'}
     headers = {'User-Agent': UA}
     r = em_get(url, params=params, headers=headers, timeout=10)
-    d = r.json().get('data', {})
+    d = r.json().get('data') or {}
     return {'code': d.get('f57', ''), 'name': d.get('f58', ''), 'industry': d.get('f127', ''), 'total_shares': d.get('f84', 0), 'float_shares': d.get('f85', 0), 'mcap': d.get('f116', 0), 'float_mcap': d.get('f117', 0), 'list_date': str(d.get('f189', '')), 'price': d.get('f43', 0)}
 
 def sina_financial_report(code: str, report_type: str='lrb', num: int=8) -> list[dict]:
@@ -823,13 +865,14 @@ def sina_financial_report(code: str, report_type: str='lrb', num: int=8) -> list
           （item_value 为新浪原始字符串数值，仅在有同比时附 "_同比" 键）
     """
     _require_requests()
-    prefix = 'sh' if code.startswith('6') else 'sz'
-    paper_code = f'{prefix}{code}'
+    prefix = get_prefix(code)
+    paper_code = f'{prefix}{norm_ticker(code)}'
     url = 'https://quotes.sina.cn/cn/api/openapi.php/CompanyFinanceService.getFinanceReport2022'
     params = {'paperCode': paper_code, 'source': report_type, 'type': '0', 'page': '1', 'num': str(num)}
     headers = {'User-Agent': UA}
     r = requests.get(url, params=params, headers=headers, timeout=15)
-    report_list = r.json().get('result', {}).get('data', {}).get('report_list', {}) or {}
+    payload = r.json() or {}
+    report_list = ((payload.get('result') or {}).get('data') or {}).get('report_list') or {}
     rows = []
     for period in sorted(report_list.keys(), reverse=True)[:num]:
         obj = report_list[period]
@@ -866,11 +909,7 @@ def _cninfo_orgid(code: str) -> str:
     org = _CNINFO_ORGID_MAP.get(code)
     if org:
         return org
-    if code.startswith('6'):
-        return f'gssh0{code}'
-    elif code.startswith('8') or code.startswith('4'):
-        return f'gsbj0{code}'
-    return f'gssz0{code}'
+    return f'gs{get_prefix(code)}0{norm_ticker(code)}'
 
 def cninfo_announcements(code: str, page_size: int=30) -> list[dict]:
     """
@@ -1179,8 +1218,8 @@ def em_hot_concept(code: str) -> list[dict]:
     返回 [{concept, bk, hit(命中热度)}, ...]，按热度降序。"""
     _require_requests()
     try:
-        prefix = 'SH' if code.startswith('6') else 'SZ'
-        r = requests.post('https://emappdata.eastmoney.com/stockrank/getHotStockRankList', json={**EM_HOT_BODY, 'srcSecurityCode': prefix + code}, headers={'User-Agent': UA}, timeout=10)
+        prefix = get_prefix(code).upper()
+        r = requests.post('https://emappdata.eastmoney.com/stockrank/getHotStockRankList', json={**EM_HOT_BODY, 'srcSecurityCode': prefix + norm_ticker(code)}, headers={'User-Agent': UA}, timeout=10)
         data = r.json().get('data') or []
     except Exception as e:
         print(f'[WARN] 东财个股概念失败: {e}')
@@ -1295,7 +1334,308 @@ def announcements_backup(code: str, page_size: int=20) -> list:
     req = urllib.request.Request(u, headers={'User-Agent': UA})
     with urllib.request.urlopen(req, timeout=15) as r:
         d = json.loads(r.read())
-    return [{'title': a.get('title'), 'time': a.get('notice_date', '')[:10], 'pdf': f"https://pdf.dfcfw.com/pdf/H2_{a.get('art_code', '')}_1.pdf"} for a in d.get('data', {}).get('list', [])]
+    return [{'title': a.get('title'), 'time': a.get('notice_date', '')[:10], 'pdf': f"https://pdf.dfcfw.com/pdf/H2_{a.get('art_code', '')}_1.pdf"} for a in (d.get('data') or {}).get('list') or []]
+
+
+
+def sina_adjust_factor(code: str, kind: str = 'qfq') -> list:
+    """新浪复权因子序列；kind=qfq(前复权) 或 hfq(后复权)，最新在前。"""
+    req = _require_requests()
+    if kind not in ('qfq', 'hfq'):
+        raise ValueError(f"kind 只能是 'qfq' 或 'hfq'，收到 {kind!r}")
+    raw, digits = str(code).strip(), norm_ticker(code)
+    explicit = re.match(r'^(sh|sz|bj)', raw, re.I) or re.search(r'\.(sh|sz|bj)$', raw, re.I)
+    prefix = explicit.group(1).lower() if explicit else get_prefix(digits)
+    symbol = f'{prefix}{digits}'
+    response = req.get(f'https://finance.sina.com.cn/realstock/company/{symbol}/{kind}.js', headers={'User-Agent': 'Mozilla/5.0', 'Referer': 'https://finance.sina.com.cn/'}, timeout=10)
+    response.raise_for_status()
+    brace = response.text.find('{')
+    if brace < 0:
+        raise RuntimeError(f'新浪复权因子响应无 JSON（{symbol}/{kind}）: {response.text[:120]}')
+    try:
+        data, _ = json.JSONDecoder().raw_decode(response.text[brace:])
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f'新浪复权因子 JSON 解析失败（{symbol}/{kind}）: {exc}') from exc
+    return [{'date': item['d'], 'factor': float(item['f'])} for item in data.get('data', [])]
+
+
+def apply_adjust(bars, factors: list, kind: str = 'qfq', price_keys=('open', 'high', 'low', 'close')):
+    """将新浪因子套到不复权 K 线；DataFrame 输入返回 DataFrame，list 输入返回 list。"""
+    if kind not in ('qfq', 'hfq'):
+        raise ValueError(f"kind 只能是 'qfq' 或 'hfq'，收到 {kind!r}")
+    if not factors:
+        raise ValueError('复权因子列表为空，无法复权；不要把未复权价当作复权价继续计算。')
+    is_df = hasattr(bars, 'columns') and hasattr(bars, 'to_dict')
+    date_col = None
+    if is_df:
+        date_col = next((c for c in ('date', 'datetime') if c in bars.columns), None)
+        if date_col is None:
+            raise ValueError(f'DataFrame 需含 date 或 datetime 列，实际列={list(bars.columns)}')
+        rows = bars.to_dict('records')
+        for row in rows: row['date'] = str(row[date_col])[:10]
+    else:
+        rows = [dict(bar) for bar in bars]
+        for row in rows:
+            if 'date' not in row: raise ValueError(f"每根 K 线需含 'date' 键，实际键={sorted(row)}")
+            row['date'] = str(row['date'])[:10]
+    fac = sorted(factors, key=lambda item: item['date'])
+    out, index, current = [], 0, None
+    for bar in sorted(rows, key=lambda item: item['date']):
+        while index < len(fac) and fac[index]['date'] <= bar['date']:
+            current = fac[index]['factor']; index += 1
+        if current is None: raise RuntimeError(f"K 线日期 {bar['date']} 早于因子序列最早日 {fac[0]['date']}，无法复权")
+        if current == 0: raise RuntimeError(f"复权因子为 0（{bar['date']}），无法换算")
+        adjusted = dict(bar)
+        for key in price_keys:
+            if key in adjusted and adjusted[key] is not None:
+                value = float(adjusted[key]); adjusted[key] = round(value / current if kind == 'qfq' else value * current, 4)
+        adjusted['adj_factor'] = current; out.append(adjusted)
+    if is_df:
+        pandas = _require_pandas(); result = pandas.DataFrame(out)
+        if getattr(bars, 'index', None) is not None and not isinstance(bars.index, pandas.RangeIndex):
+            order = sorted(range(len(bars)), key=lambda n: str(bars.iloc[n][date_col])[:10])
+            result.index = bars.index[order]; result.index.name = bars.index.name
+        return result
+    return out
+
+
+def _triangular_weights(grid, low: float, high: float, avg: float):
+    """当日筹码在价格网格上的三角分布权重。"""
+    numpy = _require_numpy(); weights = numpy.zeros_like(grid)
+    if not numpy.isfinite([low, high, avg]).all() or high < low: return weights
+    if high - low < 1e-9:
+        weights[numpy.argmin(numpy.abs(grid - low))] = 1.0; return weights
+    avg = min(max(avg, low), high); left = (grid >= low) & (grid <= avg); right = (grid > avg) & (grid <= high)
+    weights[left] = (grid[left] - low) / (avg - low) if avg - low > 1e-9 else 1.0
+    weights[right] = (high - grid[right]) / (high - avg) if high - avg > 1e-9 else 1.0
+    total = weights.sum()
+    if total > 0: return weights / total
+    weights[numpy.argmin(numpy.abs(grid - avg))] = 1.0; return weights
+
+
+def chip_distribution(data, grid_size: int = 300, decay: float = 1.0) -> dict:
+    """按 OHLC 与百分数换手率推演筹码分布；输入含 date/high/low/close/turn。"""
+    numpy, pandas = _require_numpy(), _require_pandas()
+    df = data.copy() if hasattr(data, 'columns') else pandas.DataFrame(data)
+    need = {'date', 'high', 'low', 'close', 'turn'}; missing = need - set(df.columns)
+    if missing: raise ValueError(f'chip_distribution 缺少列: {sorted(missing)}（date 用于强制时间升序）')
+    data = df.dropna(subset=['high', 'low', 'close', 'turn']).copy(); data = data[data['high'] > 0]
+    if data.empty: raise ValueError('chip_distribution: 有效行数为 0（检查是否全是停牌日，或字段类型不对）')
+    data = data.sort_values('date').reset_index(drop=True); low, high = float(data['low'].min()), float(data['high'].max())
+    pad = (high - low) * 0.02 or max(low * 0.02, 0.01); grid = numpy.linspace(low - pad, high + pad, grid_size); chips = None
+    for row in data.itertuples(index=False):
+        turnover = min(max(float(row.turn) / 100.0 * decay, 0.0), 1.0); avg = (float(row.high) + float(row.low) + float(row.close)) / 3.0
+        weights = _triangular_weights(grid, float(row.low), float(row.high), avg)
+        if weights.sum() <= 0: continue
+        if chips is None: chips = weights.copy(); continue
+        chips = chips * (1.0 - turnover) + weights * turnover
+    if chips is None: raise RuntimeError('chip_distribution: 所有交易日的价格区间都无效，无法构建分布')
+    total = chips.sum()
+    if total <= 0: raise RuntimeError('chip_distribution: 筹码总量为 0，无法计算指标')
+    chips = chips / total; price = float(data['close'].iloc[-1]); cumulative = numpy.cumsum(chips)
+    price_at = lambda q: float(numpy.interp(q, cumulative, grid)); p05, p15, p85, p95 = (price_at(q) for q in (0.05, 0.15, 0.85, 0.95)); peak = int(numpy.argmax(chips))
+    return {'price': price, 'profit_ratio': float(chips[grid <= price].sum()), 'avg_cost': float((grid * chips).sum()), 'cost_90': (p05, p95), 'cost_70': (p15, p85), 'concentration_90': float((p95-p05)/(p95+p05)) if p95+p05 else None, 'concentration_70': float((p85-p15)/(p85+p15)) if p85+p15 else None, 'peak_price': float(grid[peak]), 'histogram': [(float(pp), float(cc)) for pp, cc in zip(grid, chips) if cc > 1e-6]}
+
+
+@contextmanager
+def bs_session():
+    """按需创建 baostock 登录会话，异常路径也保证 logout。"""
+    bs = _require_baostock(); login = bs.login()
+    if login.error_code != '0': raise RuntimeError(f'baostock 登录失败: {login.error_code} {login.error_msg}')
+    try: yield bs
+    finally: bs.logout()
+
+
+def _rs_to_df(result) -> pd.DataFrame:
+    """baostock ResultData 转 DataFrame；错误码转异常。"""
+    pandas = _require_pandas()
+    if result.error_code != '0': raise RuntimeError(f'baostock 查询失败: {result.error_code} {result.error_msg}')
+    rows = []
+    while result.next(): rows.append(result.get_row_data())
+    return pandas.DataFrame(rows, columns=result.fields)
+
+
+def _bs_code(code: str) -> str:
+    """六位代码转 baostock 格式；不支持的市场在登录前拦截。"""
+    digits = norm_ticker(code)
+    if digits[:2] in ('60', '68', '90'): return f'sh.{digits}'
+    if digits[:2] in ('00', '30', '20'): return f'sz.{digits}'
+    raise ValueError(f'baostock 不支持该代码: {digits}（北交所 4/8/92/920 号段会被服务端拒绝）')
+
+
+def baostock_valuation_history(code: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """日频估值历史：PE/PB/PS/PCF、换手率、停牌和 ST 状态。"""
+    pandas = _require_pandas(); bs_code = _bs_code(code)
+    fields = 'date,code,close,peTTM,pbMRQ,psTTM,pcfNcfTTM,turn,tradestatus,isST'
+    with bs_session() as bs:
+        result = bs.query_history_k_data_plus(bs_code, fields, start_date=start_date, end_date=end_date, frequency='d', adjustflag='3')
+        frame = _rs_to_df(result)
+    for column in ('close', 'peTTM', 'pbMRQ', 'psTTM', 'pcfNcfTTM', 'turn'):
+        frame[column] = pandas.to_numeric(frame[column], errors='coerce')
+    return frame
+
+
+def baostock_stock_basic(code: str) -> dict:
+    """标的上市日、退市日和状态。"""
+    bs_code = _bs_code(code)
+    with bs_session() as bs: frame = _rs_to_df(bs.query_stock_basic(code=bs_code))
+    return frame.iloc[0].to_dict() if not frame.empty else {}
+
+
+SW_URL = 'https://www.swsresearch.com/swindex/pdf/SwClass2021/StockClassifyUse_stock.xls'
+
+
+def sw_industry_history() -> pd.DataFrame:
+    """申万行业归属变迁史；每只股票每次行业调整一行。"""
+    req, pandas = _require_requests(), _require_pandas()
+    try:
+        response = req.get(SW_URL, headers={'User-Agent': 'Mozilla/5.0'}, timeout=60); response.raise_for_status()
+    except req.exceptions.SSLError as exc:
+        raise RuntimeError('申万站点 SSL 握手失败；请更新本机 CA/certifi 或检查中间人代理。') from exc
+    frame = pandas.read_excel(io.BytesIO(response.content))
+    frame = frame.rename(columns={'股票代码': 'code', '计入日期': 'start_date', '行业代码': 'industry_code', '更新日期': 'update_date'})
+    missing = {'code', 'start_date', 'industry_code'} - set(frame.columns)
+    if missing: raise RuntimeError(f'申万表结构变了，缺列 {sorted(missing)}；实际列={list(frame.columns)}')
+    frame['code'] = frame['code'].astype(str).str.replace(r'\.0$', '', regex=True).str.zfill(6)
+    frame['industry_code'] = frame['industry_code'].astype(str).str.replace(r'\.0$', '', regex=True).str.zfill(6)
+    frame['l1_code'] = frame['industry_code'].str[:2] + '0000'; frame['l2_code'] = frame['industry_code'].str[:4] + '00'
+    frame['start_date'] = pandas.to_datetime(frame['start_date'], errors='coerce')
+    return frame.sort_values(['code', 'start_date']).reset_index(drop=True)
+
+
+def sw_industry_as_of(data, code: str, as_of: str) -> Optional[dict]:
+    """返回标的在指定日期所属申万行业，避免行业前视偏差。"""
+    pandas = _require_pandas(); digits = norm_ticker(code)
+    df = data.copy() if hasattr(data, 'columns') else pandas.DataFrame(data)
+    if 'start_date' in df.columns:
+        df['start_date'] = pandas.to_datetime(df['start_date'], errors='coerce')
+    subset = df[(df['code'] == digits) & (df['start_date'] <= pandas.Timestamp(as_of))]
+    if subset.empty: return None
+    row = subset.iloc[-1]
+    return {'code': digits, 'as_of': as_of, 'industry_code': row['industry_code'], 'l1_code': row['l1_code'], 'l2_code': row['l2_code'], 'since': row['start_date'].strftime('%Y-%m-%d')}
+
+PBC_BASE = 'https://www.pbc.gov.cn'
+PBC_INDEX = f'{PBC_BASE}/diaochatongjisi/116219/116319/index.html'
+NBS_INDEX = 'https://www.stats.gov.cn/sj/zxfb/'
+_MACRO_HEADERS = {'User-Agent': 'Mozilla/5.0'}
+
+
+def _macro_get(url: str, timeout: int = 30) -> str:
+    req = _require_requests()
+    response = req.get(url, headers=_MACRO_HEADERS, timeout=timeout)
+    response.raise_for_status()
+    response.encoding = response.apparent_encoding or 'utf-8'
+    return response.text
+
+
+def _abs_pbc(href: str) -> str:
+    return urljoin(PBC_BASE + '/', href)
+
+
+def _pbc_month_label(value) -> Optional[str]:
+    """人民银行 Excel 月份：2026.01→01；被 Excel 吃尾零的 2026.1→10。"""
+    match = re.match(r'^(\d{4})\.(\d{1,2})$', str(value).strip())
+    if not match:
+        return None
+    year, month = match.groups()
+    if len(month) == 1:
+        month += '0'
+    number = int(month)
+    return f'{year}-{number:02d}' if 1 <= number <= 12 else None
+
+
+def pboc_social_financing(year: Optional[int] = None) -> pd.DataFrame:
+    """人民银行社会融资规模增量统计表；月度 12 列，单位亿元，支持 2021 年起。"""
+    req, pandas = _require_requests(), _require_pandas()
+    index_html = _macro_get(PBC_INDEX)
+    years = re.findall(r'''href=["']([^"']+)["'][^>]*>\s*(\d{4})年统计数据\s*</a>''', index_html)
+    if not years:
+        raise RuntimeError('人民银行索引页未找到“XXXX年统计数据”链接，页面结构可能已变更')
+    table = {int(item_year): href for href, item_year in years}
+    target = max(table) if year is None else int(year)
+    if target not in table:
+        raise ValueError(f'人民银行无 {target} 年数据，可选年份: {sorted(table, reverse=True)[:8]}')
+    year_html = _macro_get(_abs_pbc(table[target]))
+    topics = re.findall(r'''href=["']([^"']+)["'][^>]*>\s*(社会融资规模)\s*</a>''', year_html)
+    if not topics:
+        raise RuntimeError(f'{target} 年页未找到“社会融资规模”专题链接')
+    topic_html = _macro_get(_abs_pbc(topics[0][0]))
+    books = re.findall(r'''href=["']([^"']+\.xlsx?)["']''', topic_html)
+    if not books:
+        raise RuntimeError(f'{target} 年社融专题页未找到 xls/xlsx 附件')
+    response = req.get(_abs_pbc(books[0]), headers=_MACRO_HEADERS, timeout=60)
+    response.raise_for_status()
+    raw = pandas.read_excel(io.BytesIO(response.content), header=None)
+    start = next((i for i in range(len(raw)) if str(raw.iloc[i, 0]).strip() == '月份'), None)
+    if start is None:
+        raise RuntimeError(f'{target} 年社融表没有独立“月份”表头；本端点仅支持 2021 年起的新格式')
+    columns = ['month', 'afre_total', 'rmb_loans', 'fx_loans', 'entrusted_loans',
+               'trust_loans', 'undiscounted_bankers_acceptance', 'corporate_bonds',
+               'government_bonds', 'equity_financing', 'abs_by_depository', 'loans_written_off']
+    frame = raw.iloc[start + 3:].copy().iloc[:, :len(columns)]
+    frame.columns = columns
+    frame = frame[frame['month'].astype(str).str.match(r'^\d{4}\.\d{1,2}$', na=False)].copy()
+    for column in columns[1:]:
+        frame[column] = pandas.to_numeric(frame[column], errors='coerce')
+    frame['month'] = [_pbc_month_label(value) for value in frame['month']]
+    frame = frame[frame['month'].notna()]
+    frame = frame[frame['month'].str.startswith(f'{target}-')]
+    frame = frame.dropna(subset=['afre_total']).reset_index(drop=True)
+    if frame.empty:
+        raise RuntimeError(f'社融表解析后无有效月份（{target} 年），格式可能已变更')
+    return frame
+
+
+def _parse_nbs_pmi_text(title: str, html: str, source_url: str) -> dict:
+    text = re.sub(r'<(script|style)[^>]*>.*?</\1>', '', html, flags=re.S)
+    text = re.sub(r'<[^>]+>', '', text)
+    text = re.sub(r'[\s\u3000\xa0]+', '', text)
+    def grab(pattern):
+        match = re.search(pattern, text)
+        return float(match.group(1)) if match else None
+    year_month = re.search(r'(\d{4})年(\d{1,2})月', title)
+    large = medium = small = None
+    combined = re.search(r'大、中、小型企业PMI分别为([\d.]+)%、([\d.]+)%和([\d.]+)%', text)
+    if combined:
+        large, medium, small = (float(value) for value in combined.groups())
+    else:
+        medium_small = re.search(r'中、小型企业PMI分别为([\d.]+)%和([\d.]+)%', text)
+        if medium_small:
+            medium, small = (float(value) for value in medium_small.groups())
+        for name, pattern in (('large', r'大型企业PMI为([\d.]+)%'),
+                              ('medium', r'中型企业PMI为([\d.]+)%'),
+                              ('small', r'小型企业PMI为([\d.]+)%')):
+            match = re.search(pattern, text)
+            if match:
+                value = float(match.group(1))
+                if name == 'large': large = value
+                elif name == 'medium' and medium is None: medium = value
+                elif name == 'small' and small is None: small = value
+    result = {
+        'title': title.strip(),
+        'period': f'{year_month.group(1)}-{int(year_month.group(2)):02d}' if year_month else None,
+        'manufacturing_pmi': grab(r'(?<!非)制造业采购经理指数（PMI）为([\d.]+)%'),
+        'non_manufacturing_pmi': grab(r'非制造业商务活动指数为([\d.]+)%'),
+        'composite_pmi': grab(r'综合PMI产出指数为([\d.]+)%'),
+        'pmi_large': large, 'pmi_medium': medium, 'pmi_small': small,
+        'source_url': source_url,
+    }
+    absent = [key for key in ('manufacturing_pmi', 'non_manufacturing_pmi', 'composite_pmi') if result[key] is None]
+    if absent:
+        raise RuntimeError(f'PMI 正文措辞可能已变更，无法解析 {absent}；请核对页面：{source_url}')
+    return result
+
+
+def nbs_pmi() -> dict:
+    """国家统计局最新 PMI：制造业、非制造业、综合产出及大中小型企业。"""
+    index_html = _macro_get(NBS_INDEX)
+    links = re.findall(r'<a[^>]+href="([^"]+)"[^>]*>\s*([^<]{6,80}?)\s*</a>', index_html)
+    hit = next(((href, title) for href, title in links if '采购经理指数' in title), None)
+    if not hit:
+        raise RuntimeError('国家统计局最新发布页未找到“采购经理指数”条目')
+    href, title = hit
+    url = urljoin(NBS_INDEX, href)
+    return _parse_nbs_pmi_text(title, _macro_get(url), url)
 
 
 def _to_jsonable(value: Any) -> Any:

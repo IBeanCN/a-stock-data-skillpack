@@ -35,3 +35,10 @@ python3 scripts/validate_env.py
 python3 scripts/smoke_test_endpoints.py
 python3 scripts/smoke_test_endpoints.py --network
 ```
+
+## v3.7 数据源边界
+
+- 东财市场路由正确不代表 ETF 具有个股资金流；部分 ETF 仍会返回空。
+- baostock 不支持北交所；新浪北交所复权因子可能 404。
+- 申万 XLS 出现 SSL 错误时更新 CA/certifi 并检查代理。
+- 社融仅支持 2021 年起新表格式；PMI 主字段或页面措辞变更时会抛错而非静默返回空。

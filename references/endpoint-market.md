@@ -41,3 +41,10 @@ mootdx K 线是不复权原始价，跨除权除息日估值或回测前需自�
 ## mootdx 验活
 
 `tdx_client()` 不只做 TCP 握手，还会对 `market='std'` 候选服务器真实拉取一根 K 线；握手成功但返回空数据的坏服务器会被跳过。非 `std` 市场跳过 A 股样本验活，避免把正常扩展行情服务器误判为失效。
+
+## 复权因子与价格换算（v3.7）
+
+- `sina_adjust_factor(code, kind="qfq"|"hfq")`：新浪因子序列；响应尾部带注释，脚本用 `JSONDecoder.raw_decode()`。北交所当前返回 404，无自动备用源。
+- `apply_adjust(bars, factors, kind)`：接收 DataFrame 或 records；qfq 为不复权价格 **除以** factor，hfq 为 **乘以** factor。DataFrame 会保留时间索引。
+- 空因子、零因子或 K 线早于最早因子会抛错，避免在同一结果中混入未复权价。
+- `get_prefix()` 将前缀和后缀显式市场视为等价；`em_secid()` 统一生成东财市场号。

@@ -1,5 +1,15 @@
 # Changelog
 
+## v3.7.1 — 2026-08-20
+
+- 同步上游 v3.7.0/v3.7.1：新增 1 个宏观层、7 个公开端点、4 个数据源，形成十一层数据能力。
+- 新增 `sina_adjust_factor()` / `apply_adjust()`：qfq 使用除法、hfq 使用乘法，支持 DataFrame 与 records，并对空因子、零因子及未覆盖日期 fail-fast。
+- 新增 `chip_distribution()`：按 OHLC 与换手率推演筹码，首日播种全部流通筹码并强制日期升序。
+- 新增 baostock 估值历史和上市/退市状态；北交所在登录前明确拒绝。
+- 新增申万行业归属变迁、人民银行社融和国家统计局 PMI。
+- 新增 `em_market_code()` / `em_secid()`，修复沪市 ETF、科创 ETF、沪 B 股市场号；统一处理 `data: null`。
+- `get_prefix()` 现在优先识别 `.SH/.SZ/.BJ` 显式后缀，避免 `000016.SH` 静默路由到另一市场。
+
 ## v3.6.1 — 2026-08-09
 
 - 修复 `dragon_tiger_board()` 在回看窗口无上榜记录时读取未初始化 `buy_data` / `sell_data` 并抛 `UnboundLocalError`。

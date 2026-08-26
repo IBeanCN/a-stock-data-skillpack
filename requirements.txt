@@ -3,3 +3,7 @@ pandas
 lxml
 mootdx
 stockstats
+numpy
+baostock>=0.8
+xlrd>=2.0
+openpyxl

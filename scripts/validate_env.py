@@ -15,7 +15,7 @@ def _check_module(name: str) -> tuple[str, str]:
 
 def main() -> int:
     print(f"Python: {sys.version.split()[0]}")
-    for module in ["requests", "pandas", "lxml", "mootdx", "stockstats"]:
+    for module in ["requests", "pandas", "lxml", "mootdx", "stockstats", "numpy", "baostock", "xlrd", "openpyxl"]:
         status, message = _check_module(module)
         print(f"{status} {message}")
 

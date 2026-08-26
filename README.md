@@ -23,7 +23,7 @@ requirements.txt                  # Python 依赖
 - 新增 `validate_env.py`，检查运行依赖和 `IWENCAI_API_KEY`。
 - 新增 `smoke_test_endpoints.py`，用于无网络函数完整性校验和可选网络探测。
 - 保留并整理原项目的 A 股数据端点能力，包括行情、研报、信号、资金面、新闻、基础数据、公告、打板、ETF 期权、舆情互动和备用源。
-- 当前同步至上游 `v3.6.1`：修复龙虎榜回看窗口无上榜记录时的 `UnboundLocalError`，并保留 v3.6.0 的重点监控池、日内严重异常波动、严格 ticker 归一化和北交所老号段识别等能力。
+- 当前同步至上游 `v3.7.1`：新增新浪复权因子、本地筹码分布、baostock 估值历史与上市状态、申万行业变迁、人民银行社融和国家统计局 PMI；统一东财市场路由，并修复 `.SH/.SZ/.BJ` 显式后缀可能静默取错标的的问题。
 
 ## 快速开始
 
@@ -87,12 +87,13 @@ cp -R SKILL.md scripts references requirements.txt ~/.claude/skills/a-stock-data
 | 文件 | 内容 |
 |---|---|
 | `references/conventions.md` | 依赖、代码归一化、数据源优先级、东财防封、输出要求 |
-| `references/endpoint-market.md` | 行情、K 线、盘口、指数、ETF |
+| `references/endpoint-market.md` | 行情、K 线、复权因子、盘口、指数、ETF |
 | `references/endpoint-research.md` | 研报、PDF、一致预期、iwencai |
 | `references/endpoint-signals.md` | 热点、北向、概念、资金流、龙虎榜、解禁、行业 |
-| `references/endpoint-capital-chip.md` | 两融、大宗、股东户数、分红、120 日资金流 |
+| `references/endpoint-capital-chip.md` | 两融、大宗、股东户数、分红、120 日资金流、筹码分布 |
 | `references/endpoint-news.md` | 个股新闻、财联社电报、7x24 快讯 |
-| `references/endpoint-fundamentals.md` | 基础面、财报、F10 |
+| `references/endpoint-fundamentals.md` | 基础面、估值历史、上市状态、申万行业历史、财报、F10 |
+| `references/endpoint-macro.md` | 人民银行社融、国家统计局 PMI |
 | `references/endpoint-announcements.md` | 公告 |
 | `references/endpoint-limit-up.md` | 涨停池、炸板池、跌停池、打板情绪 |
 | `references/endpoint-options.md` | ETF 期权 |
