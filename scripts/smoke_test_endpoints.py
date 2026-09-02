@@ -127,6 +127,7 @@ def main() -> int:
     assert client.get_prefix("510300") == "sh"
     assert client.get_prefix("000300") == "sh"
     assert client.get_prefix("920002") == "bj"
+    assert client.get_prefix("400001") == "bj"
     assert client.get_prefix("000001") == "sz"
     assert client.get_prefix("000016.SH") == "sh"
     assert client.get_prefix("000016.SZ") == "sz"

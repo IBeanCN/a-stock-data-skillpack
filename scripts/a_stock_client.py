@@ -97,7 +97,7 @@ _TICKER_RE = re.compile(
 
 def _natural_market(digits: str) -> str:
     """六位代码的自然市场；000xxx 的指数/个股歧义由调用方处理。"""
-    if digits.startswith('92') or digits[:2] in ('43', '83', '87'):
+    if digits.startswith(('4', '8', '92')):
         return 'bj'
     if digits[0] in ('5', '6', '9'):
         return 'sh'
@@ -1056,7 +1056,7 @@ ANOMALY_RULES = {
 
 def _anomaly_market(code, market, board=None) -> str:
     value = str(code or '')
-    if value.startswith('920') or value[:2] in ('43', '83', '87') or board == 8:
+    if value.startswith(('4', '8', '92')) or board == 8:
         return 'BJ'
     return 'SH' if market == 1 else 'SZ'
 

@@ -2,11 +2,11 @@
 name: a-stock-data
 description: 当任务需要写代码实际获取A股数据时使用：行情/K线、研报、信号、资金面、新闻、财务/F10、公告、打板、ETF期权、舆情互动、备用源、复权、筹码、估值历史、行业历史和宏观数据等真实数据。渐进式披露 Skill 包：SKILL.md 只负责触发、路由和约束；端点实现统一在 scripts/a_stock_client.py；端点说明、字段口径、工作流、FAQ 按需读取 references/。
 origin: custom
-version: 3.7.1-progressive-client
+version: 3.7.2-progressive-client
 ---
 # A股全栈数据工具包（渐进式披露）
 
-> v3.7.1：新增复权因子、筹码分布、baostock 估值/上市状态、申万行业历史、社融与 PMI；修复东财沪市 ETF 路由及显式市场后缀错票。
+> v3.7.2：统一北交所号段判定，覆盖 4x/8x/92x；保留 v3.7.1 的复权因子、筹码分布、估值历史和显式市场后缀修复。
 
 项目主页：https://github.com/simonlin1212/a-stock-data  
 作者：Simon 林 · 抖音「Simon林」· 公众号「硅基世纪」
