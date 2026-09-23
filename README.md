@@ -22,8 +22,11 @@ requirements.txt                  # Python 依赖
 - 将端点说明、字段口径、估值公式、工作流和故障处理拆进 `references/`。
 - 新增 `validate_env.py`，检查运行依赖和 `IWENCAI_API_KEY`。
 - 新增 `smoke_test_endpoints.py`，用于无网络函数完整性校验和可选网络探测。
-- 保留并整理原项目的 A 股数据端点能力，包括行情、研报、信号、资金面、新闻、基础数据、公告、打板、ETF 期权、舆情互动和备用源。
-- 当前同步至上游 `v3.8.0`：统一北交所 `4x/8x/92x` 号段判定，避免代码归一化与异动市场映射规则不一致；并保留 v3.7.1 的复权因子、筹码分布、估值历史、宏观端点和显式市场后缀修复。
+- 保留并整理原项目的 A 股数据端点能力，包括行情、研报、信号、资金面、新闻、基础数据、公告、打板、ETF 期权、舆情互动、期货与大宗商品、事件驱动、可转债和备用源。
+- 当前同步至上游 `v3.10.0`：十五层、87 个入口（82 主入口 + 5 备胎）、34 个来源。
+  本次吸收上游 v3.9.0 / v3.10.0 的 25 + 2 个入口：腾讯 K 线与当日逐笔、通达信官网盘后包、新浪研报列表、ETF 份额、
+  华尔街见闻快讯、新闻联播、ST 名单、上证e互动、中债收益率曲线、回购定盘利率、LPR、全球宏观日历、
+  期货与大宗商品（7 个）、事件驱动（6 个）、可转债；并处理通达信行情命令失效（#52）与聚宽代码支持（#55）。
 
 ## 快速开始
 
@@ -51,6 +54,7 @@ python3 scripts/a_stock_client.py list
 python3 scripts/a_stock_client.py call tencent_quote --args '[["600519", "000001"]]'
 python3 scripts/a_stock_client.py call forward_pe --args '[100, 5]'
 python3 scripts/a_stock_client.py call normalize_code --args '["688017.SH"]'
+python3 scripts/a_stock_client.py call to_joinquant --args '["sh000001"]'
 ```
 
 运行 smoke test：

@@ -5,8 +5,19 @@
 | 东财龙虎榜被封或为空 | `dragon_tiger_backup(date)` | 上交所/深交所官方 |
 | 东财资金流被封或为空 | `fund_flow_backup(code)` | 新浪日度资金流 |
 | 巨潮公告被封或为空 | `announcements_backup(code)` | 深交所官方/东财沪市公告 |
+| mootdx 行情命令返回空（#52） | `tencent_kline(code)` / `tdx_daily_package(date)` | 腾讯 / 通达信官网盘后包 |
+| mootdx `transaction()` 返回空 | `tencent_ticks(code)` | 腾讯（当日分笔） |
+| 东财研报不可达 | `sina_research_reports(code)` | 新浪（无评级与目标价） |
+| 财联社 / 东财 7x24 不可达 | `wallstreetcn_lives(channel)` | 华尔街见闻 |
+| 巨潮互动易对沪市返回 0 条 | `sse_e_interaction(code)` | 上证e互动（上交所官方） |
+| 大商所官方日行情（412 反爬，未接入） | `futures_kline("M0")` / `futures_realtime(["M0"])` | 新浪 |
 
 降级后必须说明口径变化。例如新浪日度资金流不能和东财分钟资金流直接相加。
+
+## mootdx 行情失效后的分层（2026-09 起）
+
+通达信公开服务器的 K 线 / 盘口 / 逐笔命令普遍返回 0 行（10 台服务器逐台实测，TCP 都可达）。
+财务快照与 F10 仍正常，用 `tdx_client(check='finance')`；行情改用腾讯 K 线 / 逐笔与通达信官网盘后包。
 
 ## v3.7 无自动备用的能力
 

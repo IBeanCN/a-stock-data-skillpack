@@ -1,5 +1,32 @@
 # Changelog
 
+## v3.10.0 — 2026-09-23（同步上游 v3.10.0）
+
+- 同步上游 v3.10.0：新增 `tencent_ticks()`（腾讯当日逐笔，替代失效的 mootdx `transaction()`）与
+  `futures_kline()`（新浪期货日 K，补上大商所历史日线，六家交易所全覆盖）。
+- 行情层按上游重新排序：可用来源在前、mootdx 留档（函数名与签名未变）。
+- 上期能源在首个交易日之前发空文件时按「当时还没有」抛 `ValueError`，不再报成格式改变；
+  `futures_daily()` 起始日更正为上期所 2002-01-07、中金所 2010-04-16。
+- 大商所报错提示指向 `futures_kline()` / `futures_realtime()`，通达信行情验活失败的提示加上逐笔替代入口。
+
+## v3.9.0 — 2026-09-23（同步上游 v3.9.0）
+
+- 同步上游 v3.9.0：新增三层、25 个入口、12 个来源。
+- 行情层：`tencent_kline()`（沪深日/周/月前后复权 + 1~60 分钟，三入口轮换）、`tdx_daily_package()`（通达信官网盘后包，含成交额）。
+- 研报层：`sina_research_reports()`（新浪第二来源，内置 6 秒最小间隔）。
+- 资金面：`etf_shares()`（上交所按日归档 + 深交所快照）。
+- 新闻层：`wallstreetcn_lives()`（华尔街见闻 7×24）、`cctv_news()`（新闻联播条目与文字稿）。
+- 基础信息：`st_stock_list()`（沪深京 ST 名单，东财不可达时退 baostock）。
+- 舆情层：`sse_e_interaction()`（上证e互动，补上巨潮互动易不覆盖的沪市问答）。
+- 宏观与利率层：`chinabond_yield_curve()`、`repo_fixing_rates()`、`lpr_history()`、`macro_calendar()`。
+- 新增 Layer 13 期货与大宗商品（`futures_daily` / `options_daily` / `futures_position_rank` / `futures_realtime` / `a50_futures` / `sge_spot`）、
+  Layer 14 事件驱动（业绩预告 / 机构调研 / 股东增减持 / 回购 / 股权质押 / 新股申购）与 Layer 15 可转债。
+- 通达信 #52 分流：`tdx_client(check='finance')` 用财务快照 + F10 类别与正文验活，财务 / F10 调用不再被行情失效误判。
+- 聚宽 #55：`normalize_code()` / `get_prefix()` 认 `.XSHG` / `.XSHE` 并校验与号段是否矛盾，新增 `to_joinquant()`。
+- 新入口统一错误契约：`RuntimeError` 表示来源结构 / 数值 / 日期异常或翻页不完整，`ValueError` 只表示参数错误或确实没有数据。
+- fork 本地修复：上证e互动列表时间补齐相对写法（`昨天 17:32` / `3小时前` / `25分钟前`，实测 778 条时间字段只有这四种形状），
+  上游同一处只认绝对时间，会让 40% 以上的条目报错。
+
 ## v3.7.2 — 2026-09-02
 
 - 同步上游北交所号段判定修复：`_natural_market()` 与 `_anomaly_market()` 统一使用 `4x/8x/92x` 规则，与 `get_prefix()` 保持一致。

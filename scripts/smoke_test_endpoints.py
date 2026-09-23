@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -84,6 +84,34 @@ REQUIRED_FUNCTIONS = [
     "sw_industry_as_of",
     "pboc_social_financing",
     "nbs_pmi",
+    "tencent_kline",
+    "tdx_daily_package",
+    "tencent_ticks",
+    "sina_research_reports",
+    "etf_shares",
+    "wallstreetcn_lives",
+    "cctv_news",
+    "st_stock_list",
+    "sse_e_interaction",
+    "chinabond_yield_curve",
+    "repo_fixing_rates",
+    "lpr_history",
+    "macro_calendar",
+    "futures_daily",
+    "options_daily",
+    "futures_position_rank",
+    "futures_realtime",
+    "futures_kline",
+    "a50_futures",
+    "sge_spot",
+    "earnings_forecast",
+    "institution_survey",
+    "holder_trades",
+    "share_buyback",
+    "equity_pledge",
+    "ipo_calendar",
+    "convertible_bonds",
+    "to_joinquant",
 ]
 
 
@@ -185,6 +213,97 @@ def main() -> int:
         "seats": {"buy": [], "sell": []},
         "institution": {"buy_amt": 0.0, "sell_amt": 0.0, "net_amt": 0.0},
     }
+    # ── 上游 v3.9.0 / v3.10.0 同步：聚宽代码（#55）、tdx 验活分流（#52）、新端点参数契约 ──
+    assert client.to_joinquant("sh000001") == "000001.XSHG"
+    assert client.to_joinquant("000001") == "000001.XSHE"
+    assert client.to_joinquant("600519") == "600519.XSHG"
+    try:
+        client.to_joinquant("920982")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("to_joinquant 未拒绝北交所（聚宽无北交所后缀）")
+    assert client.normalize_code("600519.XSHG") == "600519"
+    assert client.normalize_code("000001.XSHE") == "000001"
+    for invalid_jq in ("600519.XSHE", "SH600519.XSHG"):
+        try:
+            client.normalize_code(invalid_jq)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"聚宽后缀校验失效: {invalid_jq}")
+    assert client.get_prefix("000001.XSHG") == "sh"
+    assert client.get_prefix("000001.XSHE") == "sz"
+    assert client.sina_adjust_factor.__doc__
+    try:
+        client.tdx_client("std", "bogus")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("tdx_client 未拒绝非法 check（#52 验活分流）")
+    assert client._v39_num("1,234.50") == 1234.5
+    assert client._v39_num("--") is None
+    try:
+        client._v39_num(True)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("_v39_num 未拒绝布尔值")
+    try:
+        client.macro_calendar("2026-01-01", "2026-06-01")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("macro_calendar 未拒绝超过 92 天的区间")
+    try:
+        client.macro_calendar("2026-09-14", "2026-09-20", min_importance=9)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("macro_calendar 未拒绝非法 min_importance")
+    try:
+        client.futures_realtime([])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("futures_realtime 未拒绝空列表")
+    try:
+        client.equity_pledge(code="600519", date="2026-09-18")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("equity_pledge 未拒绝 code 与 date 同时给")
+    try:
+        client.equity_pledge(code="920982")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("equity_pledge 未拒绝北交所（中国结算只覆盖沪深）")
+    try:
+        client.futures_kline("RB")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("futures_kline 未拒绝非法合约代码")
+    try:
+        client.tencent_kline("920982")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("tencent_kline 未拒绝北交所")
+    try:
+        client.tencent_ticks("sh000001")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("tencent_ticks 未拒绝指数")
+    _sse_now = datetime(2026, 9, 23, 10, 0)
+    assert client._sse_time("2026年09月21日 11:02", _sse_now) == "2026-09-21 11:02"
+    assert client._sse_time("昨天 10:35", _sse_now) == "2026-09-22 10:35"
+    assert client._sse_time("今天 09:00", _sse_now) == "2026-09-23 09:00"
+    assert client._sse_time("25分钟前", _sse_now) == "2026-09-23 09:35"
+    assert client._sse_time("3小时前", _sse_now) == "2026-09-23 07:00"
+    assert client._sse_time("前天 09:00", _sse_now) is None
     print("OK 无网络基础校验通过")
 
     if args.network:
@@ -205,6 +324,22 @@ def main() -> int:
             ("涨停池", lambda: client.em_zt_pool(today)),
             ("重点监控池", lambda: client.em_stock_monitor()),
             ("日内异动池", lambda: client.em_price_anomaly(page_size=20)),
+            ("腾讯K线", lambda: client.tencent_kline("600519", count=20)),
+            ("腾讯逐笔", lambda: client.tencent_ticks("600519")),
+            ("新浪研报", lambda: client.sina_research_reports("600519")),
+            ("华尔街见闻快讯", lambda: client.wallstreetcn_lives(limit=5)),
+            ("央视新闻联播", lambda: client.cctv_news((datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"), with_content=False)),
+            ("ST名单", lambda: client.st_stock_list()),
+            ("上证e互动", lambda: client.sse_e_interaction("600000")),
+            ("LPR", lambda: client.lpr_history()),
+            ("回购定盘利率", lambda: client.repo_fixing_rates("FR")),
+            ("中债收益率曲线", lambda: client.chinabond_yield_curve((datetime.now() - timedelta(days=20)).strftime("%Y-%m-%d"))),
+            ("期货实时", lambda: client.futures_realtime(["RB0", "M0"])),
+            ("期货日K", lambda: client.futures_kline("RB0", start=(datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d"))),
+            ("A50期货", lambda: client.a50_futures()),
+            ("上金所现货", lambda: client.sge_spot("Au99.99")),
+            ("可转债", lambda: client.convertible_bonds()),
+            ("ETF份额", lambda: client.etf_shares((datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"), "SH")),
             ("ETF期权代码", lambda: client.sina_option_codes("510050")),
         ]
         ok = warn = 0
