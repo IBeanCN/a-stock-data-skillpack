@@ -13,6 +13,7 @@
 | 大商所官方日行情（412 反爬，未接入） | `futures_kline("M0")` / `futures_realtime(["M0"])` | 新浪 |
 
 降级后必须说明口径变化。例如新浪日度资金流不能和东财分钟资金流直接相加。
+K 线备用源的量纲也不一致：新浪 `getKLineData` 的量是**股**；腾讯 `tencent_kline()` 科创板是股、其余是手（详见 `endpoint-market.md`），降级前后不要直接比较 `volume`。
 
 ## mootdx 行情失效后的分层（2026-09 起）
 

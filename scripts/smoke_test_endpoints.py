@@ -304,11 +304,132 @@ def main() -> int:
     assert client._sse_time("25分钟前", _sse_now) == "2026-09-23 09:35"
     assert client._sse_time("3小时前", _sse_now) == "2026-09-23 07:00"
     assert client._sse_time("前天 09:00", _sse_now) is None
+    # ── 上游 v3.10.1 / v3.10.2：重试会话、逐笔盘后核对、PE 消化年数 ──
+    import inspect as _inspect
+
+    _http_params = _inspect.signature(client._v39_http).parameters
+    assert "session" in _http_params, "_v39_http 缺少 session 参数（v3.10.1）"
+    assert _http_params["session"].default is None
+    if client.requests is not None:
+        assert client.V39_RETRY_SESSION is not None, "V39_RETRY_SESSION 未建立"
+        _adapter = client.V39_RETRY_SESSION.get_adapter("https://qt.gtimg.cn/")
+        assert _adapter.max_retries.total == 3
+        assert _adapter.max_retries.connect == 3
+        assert 429 in _adapter.max_retries.status_forcelist
+        assert _adapter.max_retries.backoff_factor == 0.6
+        assert _adapter.max_retries.respect_retry_after_header is False
+
+    class _FakeResponse:
+        def __init__(self, body):
+            self.content = body.encode("gbk", "replace")
+            self.status_code = 200
+
+        def read(self):
+            return self.content
+
+        def raise_for_status(self):
+            pass
+
+    def _qt_payload(extra_fields):
+        fields = ["1", "贵州茅台", "600519", "1500.00"] + ["0"] * 60
+        fields[30] = "20260930150000"
+        fields[35] = "1500.00/1000/150000000"
+        for index, value in extra_fields.items():
+            fields[index] = value
+        return 'v_sh600519="' + "~".join(fields[:max(59, max(extra_fields) + 1)]) + '";'
+
+    _orig_v39_http = client._v39_http
+    try:
+        client._v39_http = lambda *a, **k: _FakeResponse(_qt_payload({58: "12.3456"}))
+        _snap = client._tencent_qt_snapshot("sh600519")
+        assert len(_snap) == 4, f"_tencent_qt_snapshot 应返回 4 元组，实际 {len(_snap)}"
+        assert _snap[0] == "2026-09-30" and _snap[1] == "150000"
+        assert _snap[2] == 150000000.0
+        assert abs(_snap[3] - 123456.0) < 0.01, _snap[3]
+        client._v39_http = lambda *a, **k: _FakeResponse(
+            _qt_payload({58: "--"}).replace("~--", "~").replace("~;", ";"))
+        _snap = client._tencent_qt_snapshot("sh600519")
+        assert _snap[3] is None, f"盘后成交额缺字段时应为 None，实际 {_snap[3]!r}"
+    finally:
+        client._v39_http = _orig_v39_http
+
+    def _ticks(records, snapshots):
+        _calls = [_orig_tick_page, _orig_snapshot]
+        try:
+            client._tencent_tick_page = lambda symbol, page: records if page == 0 else None
+            client._tencent_qt_snapshot = lambda symbol: snapshots.pop(0)
+            return client.tencent_ticks("600519")
+        finally:
+            client._tencent_tick_page, client._tencent_qt_snapshot = _calls
+
+    def _tick_record(seq, clock, amount):
+        return {"seq": seq, "time": clock, "price": 10.0, "change": 0.01,
+                "volume": 10.0, "amount": amount, "side": "B"}
+
+    _orig_tick_page = client._tencent_tick_page
+    _orig_snapshot = client._tencent_qt_snapshot
+    _rows = [_tick_record(0, "14:59:00", 90000.0), _tick_record(1, "15:00:30", 10000.0),
+             _tick_record(2, "15:05:00", 30000.0), _tick_record(3, "15:06:00", 20000.0)]
+    _ok = _ticks(list(_rows), [("2026-09-30", "153200", 100000.0, 50000.0)] * 2)
+    assert _ok.attrs["missing_seq"] == []
+    assert _ok.attrs["complete"] is True, f"盘后金额对上应为 True，实际 {_ok.attrs['complete']!r}"
+    _short = _ticks(list(_rows), [("2026-09-30", "153200", 100000.0, 55000.0)] * 2)
+    assert _short.attrs["complete"] is False, "盘后金额对不上应为 False"
+    _intraday = _ticks(list(_rows), [("2026-09-30", "145900", 100000.0, 50000.0)] * 2)
+    assert _intraday.attrs["complete"] is None, "15:31 前无法核对应为 None"
+    _gap = _ticks([_tick_record(0, "14:59:00", 90000.0), _tick_record(1, "15:00:30", 10000.0),
+                   _tick_record(4, "15:05:00", 30000.0)], [("2026-09-30", "153200", 100000.0, 50000.0)] * 2)
+    assert _gap.attrs["missing_seq"] == [2, 3]
+    assert _gap.attrs["complete"] is False, "有缺号时应为 False"
+
+    _orig_urlopen = client.urllib.request.urlopen
+
+    def _quote_response(price):
+        fields = ["1", "贵州茅台", "600519", str(price)] + ["0"] * 60
+        fields[39] = "20.0"
+        fields[44] = "2000"   # 流通市值
+        fields[45] = "3000"   # 总市值：full_valuation 的 mcap_yi 必须取这个
+        fields[46] = "8.0"
+        payload = 'v_sh600519="' + "~".join(fields) + '";'
+        return _FakeResponse(payload)
+
+    def _valuation(price, eps_cur, eps_next):
+        frame = client.pd.DataFrame(
+            [{"预测年度": "2026", "预测每股收益均值": eps_cur, "预测机构数": 12},
+             {"预测年度": "2027", "预测每股收益均值": eps_next, "预测机构数": 12}])
+        _saved = (client.urllib.request.urlopen, client.ths_eps_forecast)
+        try:
+            client.urllib.request.urlopen = lambda *a, **k: _quote_response(price)
+            client.ths_eps_forecast = lambda code: frame
+            return client.full_valuation("600519")
+        finally:
+            client.urllib.request.urlopen, client.ths_eps_forecast = _saved
+
+    _flat = _valuation(100.0, 1.0, 1.0)
+    assert _flat["digest_years"] is None, f"盈利不增长时消化年数应为 None，实际 {_flat['digest_years']!r}"
+    _grow = _valuation(100.0, 1.0, 1.5)
+    assert _grow["digest_years"] == round(client.pe_digestion(100.0, 0.5), 1), _grow["digest_years"]
+    _below = _valuation(20.0, 1.0, 1.5)
+    assert _below["digest_years"] == 0.0, _below["digest_years"]
+    _lost = _valuation(100.0, -1.0, -1.2)
+    assert _lost["digest_years"] is None, "当年 EPS 非正时消化年数应为 None"
+    assert _grow["mcap_yi"] == 3000.0, f"mcap_yi 应取总市值（下标 45），实际 {_grow['mcap_yi']!r}"
+    assert "科创板（688/689）是股" in (client.tencent_kline.__doc__ or ""), "tencent_kline 文档缺少科创板成交量单位说明（v3.10.1）"
+    assert "回填" in (client.tencent_kline.__doc__ or ""), "tencent_kline 文档缺少分钟量回填说明（v3.10.1）"
     print("OK 无网络基础校验通过")
 
     if args.network:
         today_dash = datetime.now().strftime("%Y-%m-%d")
         today = datetime.now().strftime("%Y%m%d")
+
+        def _tencent_ticks_checked():
+            frame = client.tencent_ticks("600519")
+            assert "complete" in frame.attrs, "tencent_ticks 缺少 frame.attrs['complete']（v3.10.1）"
+            assert "missing_seq" in frame.attrs
+            assert frame.attrs["complete"] in (True, False, None)
+            print(f"   逐笔 complete={frame.attrs['complete']} 缺号={len(frame.attrs['missing_seq'])}")
+            return frame
+
         checks = [
             ("腾讯行情", lambda: client.tencent_quote(["600519"])),
             ("百度K线", lambda: client.baidu_kline_with_ma("600519")),
@@ -325,7 +446,7 @@ def main() -> int:
             ("重点监控池", lambda: client.em_stock_monitor()),
             ("日内异动池", lambda: client.em_price_anomaly(page_size=20)),
             ("腾讯K线", lambda: client.tencent_kline("600519", count=20)),
-            ("腾讯逐笔", lambda: client.tencent_ticks("600519")),
+            ("腾讯逐笔", _tencent_ticks_checked),
             ("新浪研报", lambda: client.sina_research_reports("600519")),
             ("华尔街见闻快讯", lambda: client.wallstreetcn_lives(limit=5)),
             ("央视新闻联播", lambda: client.cctv_news((datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"), with_content=False)),

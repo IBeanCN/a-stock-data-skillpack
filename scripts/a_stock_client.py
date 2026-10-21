@@ -1310,7 +1310,7 @@ def full_valuation(code: str) -> dict:
     data = resp.read().decode('gbk')
     vals = data.split('"')[1].split('~')
     price = float(vals[3])
-    mcap = float(vals[44])
+    mcap = float(vals[45])   # 45=总市值（44 是流通市值，见 tencent_quote 的 mcap_yi / float_mcap_yi）
     pe_ttm = float(vals[39]) if vals[39] else 0
     pb = float(vals[46]) if vals[46] else 0
     df = ths_eps_forecast(code)
@@ -1337,8 +1337,10 @@ def full_valuation(code: str) -> dict:
     pe_fwd = price / eps_cur if eps_cur else float('inf')
     cagr = eps_next / eps_cur - 1 if eps_cur and eps_next else 0
     peg = pe_fwd / (cagr * 100) if cagr > 0 else float('inf')
-    digest = math.log(pe_fwd / 30) / math.log(1 + cagr) if pe_fwd > 30 and cagr > 0 else 0
-    return {'name': vals[1], 'price': price, 'mcap_yi': mcap, 'pe_ttm': pe_ttm, 'pb': pb, 'eps_cur': eps_cur, 'eps_next': eps_next, 'pe_fwd': round(pe_fwd, 1) if eps_cur else None, 'cagr_pct': round(cagr * 100, 0) if cagr else None, 'peg': round(peg, 2) if peg != float('inf') else None, 'digest_years': round(digest, 1), 'analyst_count': analyst_count}
+    # 复用 pe_digestion()：PE 已 ≤30x 返回 0，预期增长为正返回年数，增长不为正返回 inf；
+    # 当年 EPS 缺失或非正时也返回 inf。inf 在结果里落成 None（JSON null），不谎报「0 年已消化」。
+    digest = pe_digestion(pe_fwd, cagr) if eps_cur is not None and eps_cur > 0 else float("inf")
+    return {'name': vals[1], 'price': price, 'mcap_yi': mcap, 'pe_ttm': pe_ttm, 'pb': pb, 'eps_cur': eps_cur, 'eps_next': eps_next, 'pe_fwd': round(pe_fwd, 1) if eps_cur else None, 'cagr_pct': round(cagr * 100, 0) if cagr else None, 'peg': round(peg, 2) if peg != float('inf') else None, 'digest_years': round(digest, 1) if math.isfinite(digest) else None, 'analyst_count': analyst_count}
 
 def dragon_tiger_backup(trade_date: str) -> dict:
     """龙虎榜官方备用源（东财被封时用）：上交所+深交所官方，零鉴权权威一手，含营业部席位。"""
@@ -2007,16 +2009,34 @@ from datetime import date as _date_cls, datetime, timezone
 V39_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
           "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
 
+# 一次要翻几十页（腾讯逐笔）或偶尔握手卡住（新浪期货日 K）的请求走这个会话：复用连接，
+# 连接失败、握手或等响应头超时、429 / 5xx 指数退避重试（写法同 EM_SESSION）；读响应体中途超时不重试，
+# 也不按服务端给的 Retry-After 等待。
+V39_RETRY_SESSION = requests.Session() if requests is not None else None
+try:
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+    _v39_retry_adapter = HTTPAdapter(max_retries=Retry(
+        total=3, connect=3, backoff_factor=0.6, respect_retry_after_header=False,
+        status_forcelist=[429, 500, 502, 503, 504], allowed_methods=["GET"]))
+    V39_RETRY_SESSION.mount("https://", _v39_retry_adapter)
+    V39_RETRY_SESSION.mount("http://", _v39_retry_adapter)
+except Exception:
+    # 老版本 urllib3（< 1.26）缺 allowed_methods：不重试，也不复用连接
+    # （复用的连接被服务端突然断开时没有重试兜底），同 v3.10.0。
+    V39_RETRY_SESSION = None
+
 
 def _v39_http(url, params=None, data=None, headers=None, method="GET", timeout=(10, 40),
-              allow_status=(), allow_redirects=True):
+              allow_status=(), allow_redirects=True, session=None):
     """非东财的 HTTP 请求：带浏览器 UA。网络错误、非 2xx 一律抛 RuntimeError（不把错误页当数据）；
-    allow_status 里的状态码（源用 404 表示「当天没发布」时）原样返回，由调用方判断。"""
+    allow_status 里的状态码（源用 404 表示「当天没发布」时）原样返回，由调用方判断。
+    session：传 V39_RETRY_SESSION 复用连接并自动重试（哪些情况重试见它的定义）；不传每次新建连接、不重试。"""
     merged = {"User-Agent": V39_UA}
     merged.update(headers or {})
     try:
-        response = requests.request(method, url, params=params, data=data, headers=merged,
-                                    timeout=timeout, allow_redirects=allow_redirects)
+        response = (session or requests).request(method, url, params=params, data=data, headers=merged,
+                                                 timeout=timeout, allow_redirects=allow_redirects)
         if response.status_code not in allow_status:
             response.raise_for_status()
     except requests.RequestException as exc:
@@ -2263,7 +2283,9 @@ def tencent_kline(code, period="day", adjust=None, start=None, end=None, count=3
     adjust: None=日周月默认 qfq、分钟默认不复权；可显式传 'qfq' / 'hfq' / ''（不复权）
     start/end: 仅日周月可用，'YYYY-MM-DD'；给了 start 会自动按段分页（单次最多 640 根）
     count: 不给 start 时取最近 count 根；日周月 ≤ 640，分钟 ≤ 320
-    成交量单位是「手」；本接口**没有成交额**，需要成交额用 §1.3 通达信盘后包。
+    成交量单位：科创板（688/689）是股，其余是手；科创板以外，最近一个交易日的分钟量是整手、
+    下一个交易日才回填成精确股数（见 references/endpoint-market.md 成交量对账口径）。
+    本接口**没有成交额**，需要成交额用 §1.3 通达信盘后包。
     不支持北交所：腾讯对北交所只返回最新 1 根日线，区间与分钟线为空（2026-09-20 实测），直接抛 ValueError。
     """
     period = str(period).lower()
@@ -2498,8 +2520,10 @@ _TICK_SESSION_END = "15:00:59"   # 连续竞价 + 收盘集合竞价到此为止
 
 
 def _tencent_qt_snapshot(symbol):
-    """腾讯行情快照 → (交易日 'YYYY-MM-DD', 时刻 'HHMMSS', 当日成交额 元)。代码不存在抛 ValueError。"""
-    response = _v39_http(TENCENT_QT_URL + symbol)
+    """腾讯行情快照 → (交易日 'YYYY-MM-DD', 时刻 'HHMMSS', 当日成交额 元, 盘后定价成交额 元)。
+    代码不存在抛 ValueError。盘后定价成交额是下标 58 的字段（万元、4 位小数）；字段没有或认不出时为 None，
+    只是不做盘后核对。"""
+    response = _v39_http(TENCENT_QT_URL + symbol, timeout=(5, 15), session=V39_RETRY_SESSION)
     text = response.content.decode("gbk", "replace")
     if "v_pv_none_match" in text:
         raise ValueError(f"腾讯没有 {symbol} 这个代码")
@@ -2512,12 +2536,15 @@ def _tencent_qt_snapshot(symbol):
     parts = fields[35].split("/")          # 「最新价/成交量/成交额(元)」；科创板的成交量是股、其余是手，所以只用成交额
     if len(parts) != 3:
         raise RuntimeError(f"腾讯行情快照 {symbol} 的价/量/额字段是 {fields[35]!r}，格式可能已变")
-    return _v39_src_date(fields[30][:8]), fields[30][8:], _v39_req_num(parts[2], "成交额")
+    after_hours = fields[58] if len(fields) > 58 else ""
+    after_hours = round(float(after_hours) * 1e4, 2) if re.fullmatch(r"\d+(\.\d+)?", after_hours) else None
+    return _v39_src_date(fields[30][:8]), fields[30][8:], _v39_req_num(parts[2], "成交额"), after_hours
 
 
 def _tencent_tick_page(symbol, page):
     """第 page 页逐笔（0 起）→ 记录列表；翻过最后一页时腾讯返回空内容，返回 None。"""
-    response = _v39_http(TENCENT_TICK_URL, params={"appn": "detail", "action": "data", "c": symbol, "p": page})
+    response = _v39_http(TENCENT_TICK_URL, params={"appn": "detail", "action": "data", "c": symbol, "p": page},
+                         timeout=(5, 15), session=V39_RETRY_SESSION)
     text = response.content.decode("gbk", "replace").strip()
     if not text:
         return None
@@ -2547,7 +2574,9 @@ def tencent_ticks(code):
     一行一笔：date / code / time / seq（腾讯序号）/ price / change（较上一笔）/ volume（手）/ amount（元）/
     side（B 主动买 · S 主动卖 · M 中性）。约 3 秒一笔的分笔，不是 Level-2 逐笔。
     北交所、指数、代码不存在、当日没有成交抛 ValueError。收盘后调用会用行情快照的当日成交额核对连续竞价段，
-    对不上抛 RuntimeError；盘后定价段腾讯偶尔缺几笔，缺的序号在 frame.attrs["missing_seq"]。
+    对不上抛 RuntimeError；盘后定价段腾讯偶尔缺几笔：中间缺的序号在 frame.attrs["missing_seq"]，
+    15:31 以后再用快照的盘后成交额核对，结果在 frame.attrs["complete"]（True 对上 / False 有缺 / None 没法核对；
+    低价 ETF 一两手的小额缺笔可能看不出）。
     """
     prefix, ticker = get_prefix(code), norm_ticker(code)
     if prefix == "bj":
@@ -2555,7 +2584,7 @@ def tencent_ticks(code):
     if (prefix, ticker[:3]) in (("sh", "000"), ("sz", "399")):
         raise ValueError(f"{prefix}{ticker} 是指数，没有逐笔成交")
     symbol = prefix + ticker
-    day, clock, amount_before = _tencent_qt_snapshot(symbol)
+    day, clock, amount_before, after_hours_before = _tencent_qt_snapshot(symbol)
     if amount_before == 0:
         raise ValueError(f"{symbol} 在 {day} 没有成交（停牌、尚未开盘或集合竞价未撮合）")
     rows, missing = [], []
@@ -2581,7 +2610,7 @@ def tencent_ticks(code):
             raise ValueError(f"{symbol} 集合竞价尚未撮合（{clock}），还没有逐笔")
         raise RuntimeError(f"{symbol} 在 {day} 成交 {amount_before:.0f} 元，腾讯逐笔却为空："
                            "开盘前腾讯可能已清空上一交易日的明细，否则是接口变了")
-    day_after, _, amount_after = _tencent_qt_snapshot(symbol)
+    day_after, clock_after, amount_after, after_hours_after = _tencent_qt_snapshot(symbol)
     if day_after != day:
         raise RuntimeError(f"取数期间交易日从 {day} 变成 {day_after}，请重试")
     session = sum(r["amount"] for r in rows if r["time"] <= _TICK_SESSION_END)
@@ -2589,11 +2618,23 @@ def tencent_ticks(code):
     if amount_after == amount_before and abs(session - amount_before) > amount_before * 0.001 + 1000:
         raise RuntimeError(f"腾讯逐笔 {symbol} 连续竞价段成交额 {session:.0f} 元，与行情快照 {amount_before:.0f} 元对不上，"
                            "逐笔可能不全")
+    # 盘后定价 15:30 结束（深市最后一笔可能正好在 15:30:00）。取数前的快照已在 15:31 以后、两次快照一致时，
+    # 15:00:59 以后各笔成交额合计应等于快照的盘后成交额（每笔取整到元，差不超过笔数 + 1 元）；
+    # 中间缺号、末尾缺笔都会对不上，但末尾缺的金额小于容差（低价 ETF 一两手）时看不出。
+    # 盘中 / 15:31 前没法核对，记 None。
+    after_hours = [r["amount"] for r in rows if r["time"] > _TICK_SESSION_END]
+    complete = None
+    if missing:
+        complete = False
+    elif (amount_after == amount_before and after_hours_before is not None
+          and after_hours_after == after_hours_before and clock >= "153100"):
+        complete = abs(sum(after_hours) - after_hours_before) <= len(after_hours) + 1
     frame = _v39_frame(rows, "tencent", f"{TENCENT_TICK_URL}?appn=detail&action=data&c={symbol}",
                        ["time", "seq", "price", "change", "volume", "amount", "side"])
     frame.insert(0, "date", day)
     frame.insert(1, "code", symbol)
     frame.attrs["missing_seq"] = missing
+    frame.attrs["complete"] = complete
     return frame
 
 
@@ -4051,7 +4092,9 @@ def futures_kline(symbol, start=None, end=None):
     start/end: 'YYYY-MM-DD'，可只给一端。主力连续换月当天会跳空，未做复权。
     实测（2026-09-22）价格与交易所官方 futures_daily 逐日一致，成交量 / 持仓偶有 ≤0.1% 的出入，精确值以 futures_daily 为准。
     结算价新浪给得不全（给 0 的统一成 None）：中金所品种基本没有；主力连续早年缺得多（CU0 5285 根缺 1364 根，
-    最晚缺到 2024-09-25），需要结算价用 futures_daily。具体合约只能取到约 2022 年起到期的，更早的新浪返回空。
+    最晚缺到 2024-09-25），需要结算价用 futures_daily。具体合约只能取到约 2022 年起到期的，更早的新浪返回空；
+    中金所主力连续（IF0 / IC0 / IH0 / T0 / TF0）只从 2017-01-17 起，更早的用 futures_daily。
+    新浪每次都返回该代码的全部历史（RB0 约 0.5 MB），start / end 是取回后本地筛选。
     代码不存在 / 太老、区间内没有 K 线抛 ValueError；返回格式改变抛 RuntimeError。
     """
     code = str(symbol).strip()
@@ -4063,8 +4106,8 @@ def futures_kline(symbol, start=None, end=None):
     hi = _v39_date(end) if end else None
     if lo and hi and lo > hi:
         raise ValueError(f"start {lo} 晚于 end {hi}")
-    response = _v39_http(SINA_FUT_KLINE_URL.format(code=code), params={"symbol": code},
-                         headers={"Referer": "https://finance.sina.com.cn/"})
+    response = _v39_http(SINA_FUT_KLINE_URL.format(code=code), params={"symbol": code}, timeout=(5, 20),
+                         headers={"Referer": "https://finance.sina.com.cn/"}, session=V39_RETRY_SESSION)
     text = response.content.decode("gbk", "replace")
     match = re.search(rf"var _{re.escape(code)}=\((.*)\);?\s*$", text, re.S)
     if not match:
