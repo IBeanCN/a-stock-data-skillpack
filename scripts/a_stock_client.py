@@ -1385,7 +1385,10 @@ def announcements_backup(code: str, page_size: int=20) -> list:
 
 
 def sina_adjust_factor(code: str, kind: str = 'qfq') -> list:
-    """新浪复权因子序列；kind=qfq(前复权) 或 hfq(后复权)，最新在前。"""
+    """新浪复权因子序列；kind=qfq(前复权) 或 hfq(后复权)，最新在前。
+
+    个股返回 date/factor；基金（ETF/LOF）另含 split/dividend，对应新浪 s/u 的等差+折算口径。
+    """
     req = _require_requests()
     if kind not in ('qfq', 'hfq'):
         raise ValueError(f"kind 只能是 'qfq' 或 'hfq'，收到 {kind!r}")
@@ -1402,15 +1405,39 @@ def sina_adjust_factor(code: str, kind: str = 'qfq') -> list:
         data, _ = json.JSONDecoder().raw_decode(response.text[brace:])
     except json.JSONDecodeError as exc:
         raise RuntimeError(f'新浪复权因子 JSON 解析失败（{symbol}/{kind}）: {exc}') from exc
-    return [{'date': item['d'], 'factor': float(item['f'])} for item in data.get('data', [])]
+    rows = []
+    for item in data.get('data', []):
+        row = {'date': item['d'], 'factor': float(item['f'])}
+        # 基金（ETF/LOF）的 f 恒为 1，真正的复权信息在 s（累计份额折算比例）与 u（累计每份分红）；
+        # 只读 f 等于没做复权（上游 #64）。
+        if 's' in item or 'u' in item:
+            try:
+                row.update(split=float(item['s']), dividend=float(item['u']))
+            except (KeyError, TypeError, ValueError) as exc:
+                raise RuntimeError(f'新浪基金复权因子 s/u 格式异常（{symbol}/{kind}）: {exc}') from exc
+        rows.append(row)
+    return rows
 
 
 def apply_adjust(bars, factors: list, kind: str = 'qfq', price_keys=('open', 'high', 'low', 'close')):
-    """将新浪因子套到不复权 K 线；DataFrame 输入返回 DataFrame，list 输入返回 list。"""
+    """将新浪因子套到不复权 K 线；DataFrame 输入返回 DataFrame，list 输入返回 list。
+
+    qfq 是除法（不复权价 ÷ factor）、hfq 是乘法（不复权价 × factor），方向传错只会把历史价格
+    放大/缩小几倍且不报错。基金（ETF/LOF）的因子行带 split/dividend，改走 s/u 等差+折算口径：
+    qfq 为 raw/split-dividend、hfq 为 (raw+dividend)*split，结果另记 adj_split/adj_dividend；
+    基金 qfq 舍入后出现非正价直接抛错（长区间请改用 hfq）。
+    """
     if kind not in ('qfq', 'hfq'):
         raise ValueError(f"kind 只能是 'qfq' 或 'hfq'，收到 {kind!r}")
     if not factors:
         raise ValueError('复权因子列表为空，无法复权；不要把未复权价当作复权价继续计算。')
+    fund_mode = all('split' in item and 'dividend' in item for item in factors)
+    if not fund_mode and any('split' in item or 'dividend' in item for item in factors):
+        raise RuntimeError('复权因子表口径混杂：基金每行必须同时含 split/dividend')
+    if fund_mode:
+        for item in factors:
+            if item['split'] <= 0 or item['factor'] != 1:
+                raise RuntimeError('基金复权因子异常：split 必须 >0，factor 必须为 1')
     is_df = hasattr(bars, 'columns') and hasattr(bars, 'to_dict')
     date_col = None
     if is_df:
@@ -1428,14 +1455,24 @@ def apply_adjust(bars, factors: list, kind: str = 'qfq', price_keys=('open', 'hi
     out, index, current = [], 0, None
     for bar in sorted(rows, key=lambda item: item['date']):
         while index < len(fac) and fac[index]['date'] <= bar['date']:
-            current = fac[index]['factor']; index += 1
+            current = fac[index] if fund_mode else fac[index]['factor']; index += 1
         if current is None: raise RuntimeError(f"K 线日期 {bar['date']} 早于因子序列最早日 {fac[0]['date']}，无法复权")
-        if current == 0: raise RuntimeError(f"复权因子为 0（{bar['date']}），无法换算")
+        factor = current['factor'] if fund_mode else current
+        if factor == 0: raise RuntimeError(f"复权因子为 0（{bar['date']}），无法换算")
         adjusted = dict(bar)
         for key in price_keys:
             if key in adjusted and adjusted[key] is not None:
-                value = float(adjusted[key]); adjusted[key] = round(value / current if kind == 'qfq' else value * current, 4)
-        adjusted['adj_factor'] = current; out.append(adjusted)
+                value = float(adjusted[key])
+                if fund_mode:
+                    adjusted[key] = round(value / current['split'] - current['dividend'] if kind == 'qfq'
+                                          else (value + current['dividend']) * current['split'], 4)
+                    if kind == 'qfq' and adjusted[key] <= 0:
+                        raise RuntimeError(f"基金前复权价格 ≤0（{bar['date']}/{key}），长区间请改用 hfq")
+                else:
+                    adjusted[key] = round(value / factor if kind == 'qfq' else value * factor, 4)
+        adjusted['adj_factor'] = factor
+        if fund_mode: adjusted.update(adj_split=current['split'], adj_dividend=current['dividend'])
+        out.append(adjusted)
     if is_df:
         pandas = _require_pandas(); result = pandas.DataFrame(out)
         if getattr(bars, 'index', None) is not None and not isinstance(bars.index, pandas.RangeIndex):
@@ -2390,10 +2427,12 @@ def tencent_kline(code, period="day", adjust=None, start=None, end=None, count=3
         raise RuntimeError(f"腾讯 K 线 {symbol} {period} 在所给区间内 0 根（未上市/停牌区间/代码有误）")
     # 腾讯 qfq 是「逐次减去每股分红」的等差口径（茅台 2020-01-02：原始 1130.00，qfq 870.741，
     # 差额 259.259 正是此后累计分红），高分红股的早年价格会被减成负数（茅台 2015 年 -117.6）。
-    # 负价不能拿去算收益率，直接拒绝；长区间请用 adjust='' 再按 §1.6 比例口径复权。
+    # 负价不能拿去算收益率，直接拒绝；个股长区间请用 adjust='' 再按 §1.6 比例口径复权，
+    # 基金（ETF/LOF）长区间请用 §1.6 的 hfq（基金走等差+折算口径）。
     if any(min(r["open"], r["high"], r["low"], r["close"]) <= 0 for r in rows):
         raise RuntimeError(f"腾讯 {adjust or '原始'} 价格出现 ≤0（等差复权口径的副作用）；"
-                           "请改用 adjust='' 取不复权价，再用 §1.6 sina_adjust_factor + apply_adjust")
+                           "个股请改用 adjust='' 取不复权价，再用 §1.6 sina_adjust_factor + apply_adjust 比例复权；"
+                           "基金长区间请用 hfq")
     # 分段请求可能落在不同入口，source_url 列出实际用到的全部入口
     frame = _v39_frame(rows, "tencent", " | ".join(h + "/appstock/app/fqkline/get" for h in used_hosts))
     frame.insert(0, "code", symbol)
@@ -3113,33 +3152,66 @@ def _sse_text(fragment):
 
 _SSE_TZ = timezone(timedelta(hours=8))
 
+# 站点时间两种写法并存（2026-10-23 实测）：提问是绝对时间「2026年10月21日 17:47」，
+# 1 天内的回复是相对时间「昨天 18:22」。只认绝对写法会让整页解析直接抛错。
+_SSE_ABS_TIME = re.compile(r"(\d{4})\s*[年\-/]\s*(\d{1,2})\s*[月\-/]\s*(\d{1,2})\s*日?\s*(\d{1,2}):(\d{2})")
+_SSE_DAY_WORD_TIME = re.compile(r"^(今天|昨天|前天)\s*(\d{1,2}):(\d{2})$")
+_SSE_MONTH_DAY_TIME = re.compile(r"^(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})$")
+_SSE_AGO_TIME = re.compile(r"^(\d+)\s*(秒|分钟|小时|天)前$")
+_SSE_CLOCK_TIME = re.compile(r"^(\d{1,2}):(\d{2})$")
+_SSE_DAY_WORD = {'今天': 0, '昨天': 1, '前天': 2}
+_SSE_AGO_UNIT = {'秒': 'seconds', '分钟': 'minutes', '小时': 'hours', '天': 'days'}
+
 
 def _sse_time(text, now=None):
-    """上证e互动的列表时间 → 'YYYY-MM-DD HH:MM'。
+    """上证e互动的列表时间 → 'YYYY-MM-DD HH:MM'；认不出返回 None。
 
     实测 778 条时间字段只有四种形状（2026-09-23）：`2026年09月21日 11:02`（409 条）、
-    `昨天 17:32`（252 条）、`3小时前`（79 条）、`25分钟前`（38 条）。
+    `昨天 17:32`（252 条）、`3小时前`（79 条）、`25分钟前`（38 条）；2026-10-23 起还认
+    `今天/前天 HH:MM`、`N秒/N天前`、`刚刚`、`10-20 08:30`（跨年回退上一年）与只有 `09:31`。
     上游代码只认绝对时间，相对时间会让 40% 以上的条目直接报错，这里补齐；
-    相对时间一律按**北京时间**换算（`now` 参数只为测试注入）。
-    认不出的形状仍返回 None，由调用方按「格式可能已变」抛 RuntimeError，不静默给空值。
+    相对时间一律按**北京时间**换算，海外服务器不会因本机时区错开一天（`now` 只为测试注入）。
+    时分越界、跨年回退遇到不存在的 2 月 29 日、`N天前` 的 N 过大，都返回 None 而不是抛
+    ValueError/OverflowError —— 调用方仍按「认不出就报错」抛 RuntimeError，不静默给空值。
     """
-    text = str(text).strip()
-    match = re.search(r"(\d{4})年(\d{2})月(\d{2})日\s*(\d{2}:\d{2})", text)
+    text = (text or '').strip()
+    moment = (now or datetime.now(_SSE_TZ)).replace(tzinfo=None)
+    match = _SSE_ABS_TIME.search(text)
     if match:
-        return f"{match.group(1)}-{match.group(2)}-{match.group(3)} {match.group(4)}"
-    moment = now or datetime.now(_SSE_TZ)
-    if text.startswith("刚刚"):
-        return moment.strftime("%Y-%m-%d %H:%M")
-    match = re.fullmatch(r"(今天|昨天)\s*(\d{2}:\d{2})", text)
+        year, month, day, hour, minute = (int(group) for group in match.groups())
+        try:
+            return datetime(year, month, day, hour, minute).strftime('%Y-%m-%d %H:%M')
+        except ValueError: return None      # 2 月 30 日这类不存在的日期算认不出
+    match = _SSE_DAY_WORD_TIME.match(text)
     if match:
-        day = moment.date() if match.group(1) == "今天" else moment.date() - timedelta(days=1)
-        return f"{day.isoformat()} {match.group(2)}"
-    match = re.fullmatch(r"(\d{1,3})\s*分钟前", text)
+        try:
+            return (moment - timedelta(days=_SSE_DAY_WORD[match.group(1)])).replace(
+                hour=int(match.group(2)), minute=int(match.group(3)), second=0, microsecond=0
+            ).strftime('%Y-%m-%d %H:%M')
+        except ValueError: return None
+    match = _SSE_MONTH_DAY_TIME.match(text)
     if match:
-        return (moment - timedelta(minutes=int(match.group(1)))).strftime("%Y-%m-%d %H:%M")
-    match = re.fullmatch(r"(\d{1,3})\s*小时前", text)
+        month, day, hour, minute = (int(group) for group in match.groups())
+        try:
+            when = datetime(moment.year, month, day, hour, minute)
+        except ValueError: return None
+        if when - moment > timedelta(days=1):   # 跨年：1 月里看到「12-31」是去年的
+            try: when = when.replace(year=moment.year - 1)
+            except ValueError: return None      # 去年可能没有 2 月 29 日
+        return when.strftime('%Y-%m-%d %H:%M')
+    match = _SSE_AGO_TIME.match(text)
     if match:
-        return (moment - timedelta(hours=int(match.group(1)))).strftime("%Y-%m-%d %H:%M")
+        try:
+            return (moment - timedelta(**{_SSE_AGO_UNIT[match.group(2)]: int(match.group(1))})).strftime('%Y-%m-%d %H:%M')
+        except (OverflowError, ValueError): return None   # N 过大算认不出
+    if text in ('刚刚', '刚才'):
+        return moment.strftime('%Y-%m-%d %H:%M')
+    match = _SSE_CLOCK_TIME.match(text)     # 只有时分 = 今天
+    if match:
+        try:
+            return moment.replace(hour=int(match.group(1)), minute=int(match.group(2)),
+                                  second=0, microsecond=0).strftime('%Y-%m-%d %H:%M')
+        except ValueError: return None
     return None
 
 

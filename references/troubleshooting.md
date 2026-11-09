@@ -75,7 +75,8 @@ python3 scripts/smoke_test_endpoints.py
 python3 scripts/smoke_test_endpoints.py --network
 ```
 
-无网络模式校验 97 个必需函数、ticker 与聚宽代码归一化、复权换算、筹码分布，以及新端点的参数校验（区间上限、布尔值、市场边界）；v3.10.1 / v3.10.2 起还校验重试会话参数、快照盘后成交额解析、逐笔 `complete` 三种情形与 `digest_years` 的 None 语义。
+无网络模式校验 97 个必需函数、ticker 与聚宽代码归一化、复权换算、筹码分布，以及新端点的参数校验（区间上限、布尔值、市场边界）；v3.10.1 / v3.10.2 起还校验重试会话参数、快照盘后成交额解析、逐笔 `complete` 三种情形与 `digest_years` 的 None 语义；
+v3.10.3 / v3.10.4 起追加基金复权（qfq/hfq 换算、因子阶梯、混杂口径与异常因子拒绝）与上证e互动各种时间写法、越界返回 `None` 的断言。
 `--network` 只做 best-effort 探测：抛异常记 WARN，返回空但无异常记 OK，单个源波动不会阻断整体验证。
 
 ## v3.7 数据源边界

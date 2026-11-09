@@ -2,14 +2,17 @@
 name: a-stock-data
 description: 当任务需要写代码实际获取A股数据时使用：行情/K线/逐笔、研报、信号、资金面、新闻、财务/F10、公告、打板、ETF期权、舆情互动、期货与大宗商品、事件驱动、可转债、备用源、复权、筹码、估值历史、行业历史和宏观利率数据等真实数据。渐进式披露 Skill 包：SKILL.md 只负责触发、路由和约束；端点实现统一在 scripts/a_stock_client.py；端点说明、字段口径、工作流、FAQ 按需读取 references/。
 origin: custom
-version: 3.10.2-progressive-client
+version: 3.10.4-progressive-client
 ---
 # A股全栈数据工具包（渐进式披露）
 
-> v3.10.2：同步上游 v3.10.1 / v3.10.2 —— 不增删入口与来源，是口径与稳定性修复：
-> 腾讯 K 线成交量单位更正（科创板是股、其余是手）与成交量对账口径；腾讯逐笔改走复用连接的重试会话（约 70 秒 → 约 25 秒）
-> 并新增 `frame.attrs["complete"]` 盘后核对；新浪期货日 K 同样自动重试；`full_valuation()` 的 `digest_years`
-> 在盈利不增长或 EPS 非正时返回 `None`（不再谎报 0 年）。仍保留渐进式客户端结构。
+> v3.10.4：同步上游 v3.10.3 / v3.10.4 —— 入口数、来源数、个股返回值都不变，只修两处口径：
+> ① 基金（ETF/LOF）复权原来只读新浪 `f`（基金恒为 1，等于没复权），现补读 `s`（累计份额折算）与 `u`（累计每份分红），
+> qfq 为 `raw/split-dividend`、hfq 为 `(raw+dividend)*split`，因子多出 `split`/`dividend`、结果多出 `adj_split`/`adj_dividend`；
+> ② 上证e互动 1 天内的回复时间是相对写法（`昨天 18:22`），原来整页解析直接抛错，现相对/近似写法都换算成
+> `YYYY-MM-DD HH:MM`（按北京时间），认不出仍然报错。
+> 历史：v3.10.1 / v3.10.2 修的是腾讯 K 线成交量单位与对账口径、腾讯逐笔重试会话 + `complete` 盘后核对、
+> `full_valuation()` 的 `digest_years` 返回 `None`（不再谎报 0 年）。仍保留渐进式客户端结构。
 
 项目主页：https://github.com/simonlin1212/a-stock-data  
 作者：Simon 林 · 抖音「Simon林」· 公众号「硅基世纪」

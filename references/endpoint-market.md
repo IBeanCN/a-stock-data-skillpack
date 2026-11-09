@@ -93,6 +93,11 @@ mootdx K 线是不复权原始价，跨除权除息日估值或回测前需自�
 ## 复权因子与价格换算（v3.7）
 
 - `sina_adjust_factor(code, kind="qfq"|"hfq")`：新浪因子序列；响应尾部带注释，脚本用 `JSONDecoder.raw_decode()`。北交所当前返回 404，无自动备用源。
-- `apply_adjust(bars, factors, kind)`：接收 DataFrame 或 records；qfq 为不复权价格 **除以** factor，hfq 为 **乘以** factor。DataFrame 会保留时间索引。
-- 空因子、零因子或 K 线早于最早因子会抛错，避免在同一结果中混入未复权价。
+- 个股每行只有 `date` / `factor`；**基金（ETF/LOF）另含 `split`（累计份额折算比例）与 `dividend`（累计每份分红）**，
+  对应新浪的 `s` / `u`。基金 `f` 恒为 1，只读 `f` 等于没做复权（上游 #64）。
+- `apply_adjust(bars, factors, kind)`：接收 DataFrame 或 records；个股 qfq 为不复权价格 **除以** factor，hfq 为 **乘以** factor。DataFrame 会保留时间索引。
+- 基金走等差+折算口径：qfq 为 `raw / split - dividend`，hfq 为 `(raw + dividend) * split`；价格保留 4 位小数，
+  结果另记 `adj_split` / `adj_dividend`。**基金长区间请用 `hfq`**：qfq 舍入后出现非正价会直接抛错。
+- 空因子、零因子或 K 线早于最早因子会抛错，避免在同一结果中混入未复权价；因子表口径混杂（部分行有 `split`/`dividend`）、
+  基金 `split <= 0` 或 `factor != 1` 同样抛错。
 - `get_prefix()` 将前缀和后缀显式市场视为等价；`em_secid()` 统一生成东财市场号。

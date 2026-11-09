@@ -1,5 +1,43 @@
 # Changelog
 
+## v3.10.4 — 2026-11-08（同步上游 v3.10.3 / v3.10.4）
+
+上游 v3.10.3 / v3.10.4 不增删入口与来源，个股返回值也不变，只修基金复权与上证e互动时间列，因此本版本层数、入口数、来源数都不变。
+
+### 同步上游 v3.10.4：基金（ETF/LOF）复权补读新浪 s/u（#64）
+
+`sina_adjust_factor()` 原来只读 `f`（基金恒为 1），基金复权等于空转。现在同时读 `s`（累计份额折算比例）与 `u`（累计每份分红）：
+
+- 因子行新增 `split` / `dividend`；`apply_adjust()` 对基金走等差+折算口径：qfq `raw / split - dividend`，hfq `(raw + dividend) * split`。
+- 结果新增 `adj_split` / `adj_dividend`，价格保留 4 位小数；个股的乘除逻辑与返回值完全不变。
+- 新增校验：因子表口径混杂（只有部分行带 `split`/`dividend`）、基金 `split <= 0` 或 `factor != 1` 直接抛错；
+  基金 qfq 舍入后出现非正价抛错并提示长区间改用 `hfq`。
+- 用上游 fixtures（4 组基金 × 36 个腾讯对照检查点，2026-11-03 采集）离线复算，qfq/hfq 全部在 0.001 容差内一致。
+
+### 同步上游 v3.10.3：上证e互动相对时间导致整页解析抛错
+
+站点提问时间一直是绝对写法，但 1 天内的回复时间是 `昨天 18:22`；`_sse_time()` 只认绝对写法返回 `None`，
+`_sse_parse_feed()` 按「时间认不出必须报错」抛 `RuntimeError`，结果是只要首页有昨天回复的问答，整个 `sse_e_interaction()` 就不可用。
+
+`_sse_time()` 现在额外认：`今天/昨天/前天 HH:MM`、`N秒/N分钟/N小时/N天前`、`刚刚`/`刚才`、`10-20 08:30`（未来 1 天以上
+判为跨年、回退上一年）、只有 `09:31`（按今天算）、以及 `2026-10-21 17:47` 这类横线写法的绝对时间。
+相对时间按北京时间换算（`now` 参数只为测试注入）。时分越界、跨年回退遇到不存在的 2 月 29 日、`N天前` 的 N 过大，
+都返回 `None` 而不是抛未处理的 `ValueError`/`OverflowError`；整页解析仍按「认不出就报错」抛 `RuntimeError`。
+
+### fork 适配
+
+- 文档同步：`SKILL.md` 版本号与同步说明、`README.md` 上游版本、`references/endpoint-market.md` 基金口径、
+  `references/endpoint-sentiment.md` 时间写法、`references/troubleshooting.md` smoke 覆盖范围。
+- 未吸收上游仓库根的 `.github/` 配置与相关物料；本 fork 不加入任何作者支持入口。
+
+### 验证
+
+- `py_compile` 全脚本通过。
+- `smoke_test_endpoints.py`（无网络）通过，新增基金复权与 sse 时间写法断言。
+- `smoke_test_endpoints.py --network` 通过（29 OK / 2 WARN，均为非交易日或源端暂未发布，与本次改动无关）。
+- 上证e互动实测：全市场 `answered` / `questions` 各 8 条，`question_time` / `answer_time` 全部换算成 `YYYY-MM-DD HH:MM`。
+- 基金实测：`510300` qfq 与腾讯 qfq 收盘价一致。
+
 ## v3.10.2 — 2026-10-21（同步上游 v3.10.1 / v3.10.2）
 
 上游 v3.10.1 / v3.10.2 不增删入口与来源，只修代码与口径，因此本版本层数、入口数、来源数都不变。

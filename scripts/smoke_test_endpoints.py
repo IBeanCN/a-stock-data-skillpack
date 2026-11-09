@@ -174,6 +174,37 @@ def main() -> int:
         pass
     else:
         raise AssertionError("apply_adjust 未拒绝空因子")
+    # ── 上游 v3.10.4（#64）：基金复权补读新浪 s/u，等差+折算口径 ──
+    _fund_bar = [{"date": "2020-01-01", "open": 10, "close": 10}]
+    _fund_factor = [{"date": "1900-01-01", "factor": 1.0, "split": 2.0, "dividend": 0.5}]
+    _fund_qfq = client.apply_adjust(_fund_bar, _fund_factor, "qfq")[0]
+    _fund_hfq = client.apply_adjust(_fund_bar, _fund_factor, "hfq")[0]
+    assert _fund_qfq["close"] == 4.5, _fund_qfq["close"]          # 10/2-0.5
+    assert _fund_hfq["close"] == 21.0, _fund_hfq["close"]         # (10+0.5)*2
+    assert (_fund_qfq["adj_factor"], _fund_qfq["adj_split"], _fund_qfq["adj_dividend"]) == (1.0, 2.0, 0.5)
+    _fund_ladder = client.apply_adjust(
+        [{"date": "2020-01-02", "close": 12}, {"date": "2020-01-01", "close": 10}],
+        [{"date": "1900-01-01", "factor": 1.0, "split": 2.0, "dividend": 0.5},
+         {"date": "2020-01-02", "factor": 1.0, "split": 1.0, "dividend": 0.0}], "hfq")
+    assert [_r["close"] for _r in _fund_ladder] == [21.0, 12.0], _fund_ladder
+    for _bad, _why in (
+        ([{"date": "1900-01-01", "factor": 1.0, "split": 2.0}], "混合口径"),
+        ([{"date": "1900-01-01", "factor": 1.0, "split": 0.0, "dividend": 0.0}], "split 非正"),
+        ([{"date": "1900-01-01", "factor": 1.2, "split": 1.0, "dividend": 0.0}], "基金 factor 非 1"),
+    ):
+        try:
+            client.apply_adjust([{"date": "2020-01-01", "close": 10}], _bad, "qfq")
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError(f"apply_adjust 未拒绝基金异常因子: {_why}")
+    try:
+        client.apply_adjust([{"date": "2020-01-01", "close": 1}],
+                            [{"date": "1900-01-01", "factor": 1.0, "split": 1.0, "dividend": 2.0}], "qfq")
+    except RuntimeError as _exc:
+        assert "hfq" in str(_exc), _exc
+    else:
+        raise AssertionError("基金前复权非正价未报错")
     chips = client.chip_distribution([
         {"date": "2020-01-01", "high": 10, "low": 10, "close": 10, "turn": 1},
         {"date": "2020-01-02", "high": 100, "low": 100, "close": 100, "turn": 1},
@@ -303,7 +334,19 @@ def main() -> int:
     assert client._sse_time("今天 09:00", _sse_now) == "2026-09-23 09:00"
     assert client._sse_time("25分钟前", _sse_now) == "2026-09-23 09:35"
     assert client._sse_time("3小时前", _sse_now) == "2026-09-23 07:00"
-    assert client._sse_time("前天 09:00", _sse_now) is None
+    assert client._sse_time("前天 09:00", _sse_now) == "2026-09-21 09:00"
+    # ── 上游 v3.10.3：更多时间写法、越界不抛未处理异常 ──
+    assert client._sse_time("2026-10-21 17:47", _sse_now) == "2026-10-21 17:47"
+    assert client._sse_time("刚刚", _sse_now) == "2026-09-23 10:00"
+    assert client._sse_time("25秒前", _sse_now) == "2026-09-23 09:59"
+    assert client._sse_time("2天前", _sse_now) == "2026-09-21 10:00"
+    assert client._sse_time("09-20 08:30", _sse_now) == "2026-09-20 08:30"   # 今年已过的月日
+    assert client._sse_time("12-31 08:30", _sse_now) == "2025-12-31 08:30"   # 未来 1 天以上 = 跨年回退上一年
+    assert client._sse_time("09:31", _sse_now) == "2026-09-23 09:31"
+    assert client._sse_time("2026年02月30日 10:00", _sse_now) is None
+    assert client._sse_time("昨天 25:99", _sse_now) is None
+    assert client._sse_time("99999999999999天前", _sse_now) is None
+    assert client._sse_time("时间待定", _sse_now) is None
     # ── 上游 v3.10.1 / v3.10.2：重试会话、逐笔盘后核对、PE 消化年数 ──
     import inspect as _inspect
 
